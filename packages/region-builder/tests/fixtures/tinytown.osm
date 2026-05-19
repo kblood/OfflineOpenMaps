@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="hand-written-test-fixture">
+  <bounds minlat="42.45" minlon="1.55" maxlat="42.55" maxlon="1.65"/>
+
+  <node id="1001" lat="42.50" lon="1.56"/>
+  <node id="1002" lat="42.50" lon="1.58"/>
+  <node id="1003" lat="42.50" lon="1.60"/>
+  <node id="1004" lat="42.50" lon="1.62"/>
+  <node id="1005" lat="42.52" lon="1.56"/>
+  <node id="1006" lat="42.52" lon="1.58"/>
+  <node id="1007" lat="42.52" lon="1.60"/>
+  <node id="1008" lat="42.52" lon="1.62"/>
+  <node id="1009" lat="42.48" lon="1.58"/>
+  <node id="1010" lat="42.48" lon="1.60"/>
+
+  <node id="2001" lat="42.51" lon="1.59">
+    <tag k="place" v="village"/>
+    <tag k="name" v="Tinytown"/>
+    <tag k="addr:country" v="AD"/>
+  </node>
+  <node id="2002" lat="42.505" lon="1.585">
+    <tag k="amenity" v="cafe"/>
+    <tag k="name" v="Tiny Cafe"/>
+  </node>
+  <node id="2003" lat="42.515" lon="1.615">
+    <tag k="tourism" v="museum"/>
+    <tag k="name" v="Tinytown Museum"/>
+  </node>
+
+  <way id="3001">
+    <nd ref="1001"/>
+    <nd ref="1002"/>
+    <nd ref="1003"/>
+    <nd ref="1004"/>
+    <tag k="highway" v="primary"/>
+    <tag k="name" v="Main Street"/>
+    <tag k="maxspeed" v="50"/>
+  </way>
+  <way id="3002">
+    <nd ref="1005"/>
+    <nd ref="1006"/>
+    <nd ref="1007"/>
+    <nd ref="1008"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="North Lane"/>
+  </way>
+  <way id="3003">
+    <nd ref="1009"/>
+    <nd ref="1010"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="South Lane"/>
+  </way>
+  <way id="3004">
+    <nd ref="1001"/>
+    <nd ref="1005"/>
+    <tag k="highway" v="secondary"/>
+    <tag k="name" v="West Avenue"/>
+  </way>
+  <way id="3005">
+    <nd ref="1002"/>
+    <nd ref="1006"/>
+    <nd ref="1009"/>
+    <tag k="highway" v="secondary"/>
+    <tag k="name" v="Central Avenue"/>
+  </way>
+  <way id="3006">
+    <nd ref="1003"/>
+    <nd ref="1007"/>
+    <nd ref="1010"/>
+    <tag k="highway" v="secondary"/>
+    <tag k="name" v="East Avenue"/>
+  </way>
+  <way id="3007">
+    <nd ref="1004"/>
+    <nd ref="1008"/>
+    <tag k="highway" v="tertiary"/>
+    <tag k="name" v="Far East Road"/>
+    <tag k="oneway" v="yes"/>
+  </way>
+</osm>

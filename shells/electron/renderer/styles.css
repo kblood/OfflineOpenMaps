@@ -1,0 +1,250 @@
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+
+/* Light/default theme — variables drive every chrome surface so the
+   dark and mono variants only need to override values, not selectors. */
+.app {
+  --bg-sidebar: #f6f7f9;
+  --bg-panel-header: #eef0f3;
+  --bg-input: #fff;
+  --bg-button: #fff;
+  --bg-button-hover: #f0f2f5;
+  --bg-list: #fff;
+  --bg-list-row-hover: #f0f2f5;
+  --bg-list-row-selected: #e8f0fe;
+  --bg-section: #fafafa;
+  --bg-progress-track: #eee;
+  --bg-search-hover: #e9eef7;
+  --bg-banner: #e1ecff;
+  --bg-banner-offline: #fde2e2;
+  --bg-banner-warn: #fff3cd;
+  --border: #e3e5e8;
+  --border-input: #cfd3d8;
+  --border-faint: #f0f0f0;
+  --text: #222;
+  --text-muted: #555;
+  --text-faint: #888;
+  --text-banner: #1c3360;
+  --text-banner-offline: #6a1c1c;
+  --text-banner-warn: #5a4a00;
+  --primary: #2566e6;
+  --primary-hover: #1e54c4;
+  --primary-text: #fff;
+  --danger: #d8443a;
+  --danger-hover: #a32f25;
+}
+
+/* Dark — matches map theme="dark". */
+.app.theme-dark {
+  --bg-sidebar: #1f2228;
+  --bg-panel-header: #181a1f;
+  --bg-input: #2a2e36;
+  --bg-button: #2a2e36;
+  --bg-button-hover: #353a44;
+  --bg-list: #2a2e36;
+  --bg-list-row-hover: #353a44;
+  --bg-list-row-selected: #1f3a6a;
+  --bg-section: #232730;
+  --bg-progress-track: #353a44;
+  --bg-search-hover: #2a3a55;
+  --bg-banner: #1f3a6a;
+  --bg-banner-offline: #5a1f1f;
+  --bg-banner-warn: #4a3e15;
+  --border: #383c44;
+  --border-input: #4a4f59;
+  --border-faint: #2a2e36;
+  --text: #e6e8ec;
+  --text-muted: #b0b4be;
+  --text-faint: #80858f;
+  --text-banner: #cfe0ff;
+  --text-banner-offline: #f7caca;
+  --text-banner-warn: #f0e2a8;
+}
+
+/* Mono — neutral grayscale chrome for the mono map. */
+.app.theme-mono {
+  --bg-sidebar: #eeeeee;
+  --bg-panel-header: #e0e0e0;
+  --bg-input: #ffffff;
+  --bg-button: #f8f8f8;
+  --bg-button-hover: #e0e0e0;
+  --bg-list: #ffffff;
+  --bg-list-row-hover: #e8e8e8;
+  --bg-list-row-selected: #d8d8d8;
+  --bg-section: #f0f0f0;
+  --bg-progress-track: #d8d8d8;
+  --bg-search-hover: #e0e0e0;
+  --bg-banner: #d8d8d8;
+  --border: #cccccc;
+  --border-input: #bbbbbb;
+  --border-faint: #dddddd;
+  --text: #1a1a1a;
+  --text-muted: #555555;
+  --text-faint: #888888;
+  --text-banner: #1a1a1a;
+  --primary: #444444;
+  --primary-hover: #222222;
+}
+
+.app { display: grid; grid-template-columns: 360px 1fr; height: 100%; color: var(--text); }
+.app.sidebar-collapsed { grid-template-columns: 0 1fr; }
+.sidebar { background: var(--bg-sidebar); border-right: 1px solid var(--border); overflow-y: auto; }
+.sidebar-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--bg-panel-header);
+  color: var(--text);
+}
+.sidebar-toggle, .sidebar-expand {
+  background: var(--bg-button); border: 1px solid var(--border-input); border-radius: 4px;
+  width: 24px; height: 24px; line-height: 1; cursor: pointer; font-size: 14px; color: var(--text);
+}
+.sidebar-toggle:hover, .sidebar-expand:hover { background: var(--bg-button-hover); }
+.sidebar-expand {
+  position: absolute; top: 8px; left: 8px; z-index: 600;
+  width: 28px; height: 28px; font-size: 16px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+}
+.panel { padding: 12px 16px; border-bottom: 1px solid var(--border); color: var(--text); }
+.panel h3 { margin: 0 0 8px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); }
+.panel input[type='text'] {
+  width: 100%; padding: 6px 8px; border: 1px solid var(--border-input); border-radius: 4px; font-size: 14px;
+  background: var(--bg-input); color: var(--text);
+}
+.panel button {
+  padding: 6px 10px; border: 1px solid var(--border-input); background: var(--bg-button);
+  color: var(--text); border-radius: 4px; font-size: 13px; cursor: pointer;
+}
+.panel button:hover { background: var(--bg-button-hover); }
+.panel button.primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.panel button.primary:hover { background: var(--primary-hover); }
+.panel button.danger { background: var(--danger); color: var(--primary-text); border-color: var(--danger); }
+
+.map-pane { position: relative; }
+.map { position: absolute; inset: 0; }
+.map-pane.crosshair, .map-pane.crosshair .map, .map-pane.crosshair .maplibregl-canvas {
+  cursor: crosshair !important;
+}
+
+.result-list { list-style: none; padding: 0; margin: 8px 0 0 0; max-height: 200px; overflow-y: auto; }
+.result-list li { padding: 6px 8px; cursor: pointer; border-radius: 4px; font-size: 13px; color: var(--text); }
+.result-list li:hover { background: var(--bg-search-hover); }
+.result-list li .kind { color: var(--text-faint); font-size: 11px; }
+
+.selftest-grid { display: grid; grid-template-columns: 32px 1fr 60px; row-gap: 6px; align-items: center; font-size: 13px; }
+.selftest-status { width: 18px; height: 18px; border-radius: 50%; }
+.selftest-status.pass { background: #2eae3e; }
+.selftest-status.fail { background: var(--danger); }
+.selftest-status.skip { background: #b3b3b3; }
+.selftest-status.pending { background: #d6d8db; }
+.selftest-row.fail { color: var(--danger-hover); }
+.selftest-summary { font-size: 12px; color: var(--text-muted); grid-column: 2 / 3; padding-left: 32px; }
+
+.banner { padding: 8px 16px; background: var(--bg-banner); color: var(--text-banner); font-size: 13px; border-bottom: 1px solid var(--border); }
+.banner.offline { background: var(--bg-banner-offline); color: var(--text-banner-offline); }
+.banner.warn { background: var(--bg-banner-warn); color: var(--text-banner-warn); }
+
+.attribution { position: absolute; bottom: 6px; right: 8px; background: rgba(255,255,255,0.85); padding: 2px 6px; font-size: 11px; border-radius: 3px; }
+
+.settings-label { color: var(--text-muted); }
+
+.empty-state {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  pointer-events: none; z-index: 10;
+}
+.empty-state-card {
+  pointer-events: auto; background: var(--bg-sidebar); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 24px 28px;
+  text-align: center; max-width: 360px; box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+}
+.empty-state-card button {
+  padding: 8px 14px; border: 1px solid var(--border-input); background: var(--bg-button);
+  color: var(--text); border-radius: 4px; font-size: 14px; cursor: pointer;
+}
+.empty-state-card button.primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.empty-state-card button.primary:hover { background: var(--primary-hover); }
+
+.build-chip {
+  position: fixed; bottom: 16px; right: 16px; z-index: 900;
+  display: inline-flex; align-items: center; border-radius: 20px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.2); overflow: hidden;
+}
+.build-chip button { border: none; padding: 8px 14px; font-size: 13px; cursor: pointer; color: #fff; background: inherit; }
+.build-chip-main { background: transparent; }
+.build-chip-dismiss { padding: 8px 12px; opacity: 0.85; border-left: 1px solid rgba(255,255,255,0.25) !important; }
+.build-chip-dismiss:hover { opacity: 1; }
+.build-chip-progress { background: var(--primary); }
+.build-chip-progress button { background: var(--primary); }
+.build-chip-fail { background: #b8392f; }
+.build-chip-fail button { background: #b8392f; }
+.build-chip-cancel { background: #6b7280; }
+.build-chip-cancel button { background: #6b7280; }
+
+/* Sits flush under MapLibre's NavigationControl (top-right). Its
+   container has a 10px right margin and ~70px height with compass off
+   plus +/- buttons, so 100px from the top clears it. */
+.fit-pack-btn {
+  position: absolute; top: 100px; right: 10px; z-index: 5;
+  width: 29px; height: 29px;
+  border: none; border-radius: 4px; cursor: pointer;
+  background: #fff; color: #333; font-size: 18px; line-height: 1;
+  box-shadow: 0 0 0 2px rgba(0,0,0,0.1);
+}
+.fit-pack-btn:hover { background: #f0f2f5; }
+.app.theme-dark .fit-pack-btn { background: #2a2e36; color: #e6e8ec; box-shadow: 0 0 0 2px rgba(0,0,0,0.4); }
+.app.theme-dark .fit-pack-btn:hover { background: #353a44; }
+.app.theme-mono .fit-pack-btn { background: #f8f8f8; color: #222; }
+.app.theme-mono .fit-pack-btn:hover { background: #e8e8e8; }
+
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+  display: flex; align-items: center; justify-content: center; z-index: 1000;
+}
+.modal {
+  background: var(--bg-sidebar); color: var(--text); border-radius: 6px; width: 460px; max-width: 90vw;
+  max-height: 85vh; display: flex; flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.25); overflow: hidden;
+  border: 1px solid var(--border);
+}
+.modal-header {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg-panel-header);
+  font-weight: 600; font-size: 14px; color: var(--text);
+}
+.modal-header button {
+  background: transparent; border: none; font-size: 18px; cursor: pointer; color: var(--text-muted); padding: 0 4px;
+}
+.modal-header button:hover { color: var(--text); }
+.modal-body { padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+.modal-body label { font-size: 12px; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px; }
+.modal-body input[type='text'], .modal-body input:not([type]) {
+  padding: 6px 8px; border: 1px solid var(--border-input); border-radius: 4px; font-size: 14px;
+  background: var(--bg-input); color: var(--text);
+}
+.modal-tabs { display: flex; gap: 4px; margin-bottom: 4px; }
+.modal-tabs button { flex: 1; padding: 6px 10px; border: 1px solid var(--border-input); background: var(--bg-button); color: var(--text); border-radius: 4px; font-size: 13px; cursor: pointer; }
+.modal-tabs button:hover { background: var(--bg-button-hover); }
+.modal-tabs button.primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.modal-tabs button.primary:hover { background: var(--primary-hover); }
+.modal-body button { padding: 6px 10px; border: 1px solid var(--border-input); background: var(--bg-button); color: var(--text); border-radius: 4px; font-size: 13px; cursor: pointer; }
+.modal-body button:hover { background: var(--bg-button-hover); }
+.modal-body button.primary { background: var(--primary); color: var(--primary-text); border-color: var(--primary); }
+.modal-body button.primary:hover { background: var(--primary-hover); }
+.modal-body button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+.country-list { border: 1px solid var(--border-input); border-radius: 4px; max-height: 240px; overflow-y: auto; background: var(--bg-list); }
+.continent-header {
+  padding: 4px 8px; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); background: var(--bg-section);
+  border-bottom: 1px solid var(--border-faint); position: sticky; top: 0;
+}
+.country-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  border-bottom: 1px solid var(--border-faint); cursor: pointer; font-size: 13px; color: var(--text);
+}
+.country-row:hover { background: var(--bg-list-row-hover); }
+.country-row.selected { background: var(--bg-list-row-selected); }
+
+.progress-bar { height: 6px; background: var(--bg-progress-track); border-radius: 3px; overflow: hidden; }
+.progress-bar > div { height: 100%; background: var(--primary); transition: width 200ms ease-out; }

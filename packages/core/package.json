@@ -1,0 +1,25 @@
+{
+  "name": "@openmaps/core",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./pack": "./dist/pack/index.js",
+    "./geocode": "./dist/geocode/index.js",
+    "./route": "./dist/route/index.js",
+    "./tiles": "./dist/tiles/index.js",
+    "./selftest": "./dist/selftest/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.6"
+  }
+}

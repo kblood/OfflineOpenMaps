@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<osm version="0.6" generator="hand-written-test-fixture">
+  <bounds minlat="42.45" minlon="1.55" maxlat="42.55" maxlon="1.65"/>
+
+  <!-- A 3x3 grid of nodes -->
+  <node id="1" lat="42.50" lon="1.58"/>
+  <node id="2" lat="42.50" lon="1.60"/>
+  <node id="3" lat="42.50" lon="1.62"/>
+  <node id="4" lat="42.51" lon="1.58"/>
+  <node id="5" lat="42.51" lon="1.60"/>
+  <node id="6" lat="42.51" lon="1.62"/>
+  <node id="7" lat="42.52" lon="1.58"/>
+  <node id="8" lat="42.52" lon="1.60"/>
+  <node id="9" lat="42.52" lon="1.62"/>
+
+  <!-- Named place at center -->
+  <node id="100" lat="42.51" lon="1.60">
+    <tag k="place" v="village"/>
+    <tag k="name" v="Mixville"/>
+  </node>
+
+  <!-- Bottom row: ordinary residential (all profiles) -->
+  <way id="1001">
+    <nd ref="1"/><nd ref="2"/><nd ref="3"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="South Street"/>
+  </way>
+
+  <!-- Middle row: footway (no cars) -->
+  <way id="1002">
+    <nd ref="4"/><nd ref="5"/><nd ref="6"/>
+    <tag k="highway" v="footway"/>
+    <tag k="name" v="Mid Path"/>
+  </way>
+
+  <!-- Top row: motorway (no foot, no bike) -->
+  <way id="1003">
+    <nd ref="7"/><nd ref="8"/><nd ref="9"/>
+    <tag k="highway" v="motorway"/>
+    <tag k="name" v="Top Highway"/>
+  </way>
+
+  <!-- Vertical connectors: all-profile residential -->
+  <way id="2001">
+    <nd ref="1"/><nd ref="4"/><nd ref="7"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="West Avenue"/>
+  </way>
+  <way id="2002">
+    <nd ref="2"/><nd ref="5"/><nd ref="8"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="Center Avenue"/>
+  </way>
+  <way id="2003">
+    <nd ref="3"/><nd ref="6"/><nd ref="9"/>
+    <tag k="highway" v="residential"/>
+    <tag k="name" v="East Avenue"/>
+  </way>
+</osm>

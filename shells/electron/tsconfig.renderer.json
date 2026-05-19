@@ -1,0 +1,18 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./renderer",
+    "outDir": "./dist/renderer",
+    "module": "ES2022",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": [],
+    "composite": true
+  },
+  "references": [
+    { "path": "../../packages/core" }
+  ],
+  "include": ["renderer/**/*.ts", "renderer/**/*.tsx"],
+  "exclude": ["dist", "node_modules"]
+}

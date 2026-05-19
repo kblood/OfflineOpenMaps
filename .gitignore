@@ -1,0 +1,25 @@
+node_modules/
+dist/
+build/
+out/
+release/
+.vite/
+.turbo/
+*.log
+.DS_Store
+
+# Region packs are large — never commit
+packs/
+!packages/region-builder/fixtures/andorra/
+*.pmtiles
+*.rd5
+
+# Real-OSM test fixtures (multi-MB) — fetched on demand, not committed.
+packages/region-builder/tests/fixtures/real/
+
+# Editor
+.vscode/
+.idea/
+
+# OS
+Thumbs.db

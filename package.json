@@ -1,0 +1,30 @@
+{
+  "name": "openmaps-v2",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first mapping app. Rewrite of OpenMaps with verifiable offline guarantees.",
+  "workspaces": [
+    "packages/*",
+    "shells/electron",
+    "e2e"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "selftest": "node ./scripts/run-selftest.mjs",
+    "region-builder": "npm run start -w @openmaps/region-builder --"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "@types/node": "^22.0.0",
+    "vitest": "^2.1.0",
+    "eslint": "^9.10.0",
+    "@typescript-eslint/parser": "^8.5.0",
+    "@typescript-eslint/eslint-plugin": "^8.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
