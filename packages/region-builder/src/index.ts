@@ -16,6 +16,12 @@ export type {
   RoadEdge,
   PlaceFeature,
   WaterPolygon,
+  BuildingPolygon,
   SyntheticData,
 } from './synthetic.js';
 export type { RawOsm, RawOsmNode, RawOsmWay } from './osmTypes.js';
+export { fetchDawa, applyDawa } from './dawaFetcher.js';
+export { snapAddressesToBuildings } from './snapAddresses.js';
+export type { SnapResult } from './snapAddresses.js';
+export type { DawaAddress, DawaFetchResult, DawaFetchOpts, ParcelPolygon } from './dawaFetcher.js';
+export type { ParcelGeometry } from './synthetic.js';

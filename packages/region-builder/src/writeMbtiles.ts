@@ -52,6 +52,7 @@ export function writeMbtiles(outPath: string, data: SyntheticData, opts: { name:
         JSON.stringify({
           vector_layers: [
             { id: 'water', minzoom: MIN_ZOOM, maxzoom: MAX_ZOOM, fields: { name: 'String' } },
+            { id: 'buildings', minzoom: MIN_ZOOM, maxzoom: MAX_ZOOM, fields: { name: 'String' } },
             { id: 'roads', minzoom: MIN_ZOOM, maxzoom: MAX_ZOOM, fields: { name: 'String', ref: 'String', highway: 'String' } },
             { id: 'places', minzoom: MIN_ZOOM, maxzoom: MAX_ZOOM, fields: { name: 'String', kind: 'String' } },
           ],
@@ -198,6 +199,33 @@ export function writeMbtiles(outPath: string, data: SyntheticData, opts: { name:
         )
       : null;
 
+    // Buildings. We only emit them from z=13 upward — at z<13 individual
+    // building outlines are sub-pixel and would just blur the tile out.
+    // Skipping them at low zoom also keeps the pack small (Aalborg has
+    // ~30k buildings; encoding them at z=8 multiplies bytes for no
+    // visible benefit). MIN_ZOOM stays the metadata advertised value;
+    // the per-zoom skip below controls actual emission.
+    const BUILDINGS_MIN_ZOOM = 13;
+    const buildingFeatures = (data.buildings ?? []).map((b) => {
+      const properties: { name?: string } = {};
+      if (b.name) properties.name = b.name;
+      const ring: number[][] = b.ring.map(([lon, lat]) => [lon, lat]);
+      return {
+        type: 'Feature' as const,
+        geometry: { type: 'Polygon' as const, coordinates: [ring] },
+        properties,
+      };
+    });
+    const buildingsLayer = buildingFeatures.length > 0
+      ? geojsonvt(
+          { type: 'FeatureCollection', features: buildingFeatures },
+          // Buildings are small polygons; aggressive simplification at
+          // higher tolerance loses the rectangular look. Keep
+          // tolerance=1 so corners stay crisp at the zooms we emit.
+          { maxZoom: MAX_ZOOM, indexMaxZoom: MAX_ZOOM, tolerance: 1 },
+        )
+      : null;
+
     const insertTile = db.prepare(
       'INSERT INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)',
     );
@@ -210,13 +238,19 @@ export function writeMbtiles(outPath: string, data: SyntheticData, opts: { name:
           const roadsTile = roadsLayer.getTile(z, x, y);
           const placesTile = placesLayer.getTile(z, x, y);
           const waterTile = waterLayer ? waterLayer.getTile(z, x, y) : null;
-          if (!roadsTile && !placesTile && !waterTile) continue;
+          const buildingsTile =
+            buildingsLayer && z >= BUILDINGS_MIN_ZOOM
+              ? buildingsLayer.getTile(z, x, y)
+              : null;
+          if (!roadsTile && !placesTile && !waterTile && !buildingsTile) continue;
           const layers: Record<string, unknown> = {};
-          // Water goes first so the MVT preserves the rendering order
-          // hint — though MapLibre uses style-layer order, not tile-layer
-          // order, this matches user expectation if a debugger inspects
-          // the tile manually.
+          // Water first, then buildings under roads — so a building
+          // outline shows through under a foot/cycle path that crosses
+          // its corner but the road network paints over it on the main
+          // grid. (MapLibre uses style-layer order; this just helps
+          // anyone inspecting tile bytes by hand.)
           if (waterTile) layers.water = waterTile;
+          if (buildingsTile) layers.buildings = buildingsTile;
           if (roadsTile) layers.roads = roadsTile;
           if (placesTile) layers.places = placesTile;
           const buf = vtpbf.fromGeojsonVt(layers as never);

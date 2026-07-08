@@ -1,5 +1,11 @@
 import { createOSMStream } from 'osm-pbf-parser-node';
-import type { RawOsm, RawOsmNode, RawOsmWay } from './osmTypes.js';
+import type {
+  RawOsm,
+  RawOsmNode,
+  RawOsmRelation,
+  RawOsmRelationMember,
+  RawOsmWay,
+} from './osmTypes.js';
 
 /**
  * Streaming reader for OSM PBF (Geofabrik exports use this format). Wraps
@@ -13,7 +19,9 @@ import type { RawOsm, RawOsmNode, RawOsmWay } from './osmTypes.js';
  * land entirely outside are dropped before we add them. That keeps the
  * memory footprint proportional to the clipped region, not the full PBF.
  *
- * Relations are skipped — turn restrictions and multipolygons aren't in v1.
+ * Relations: kept (members + tags) for downstream multipolygon-water
+ * assembly. Turn-restriction relations and other types are captured but
+ * ignored by osmToPack.
  */
 export interface OsmPbfReadOpts {
   /** Drop nodes outside this bbox during parse: [minLon, minLat, maxLon, maxLat]. */
@@ -39,14 +47,23 @@ interface ParsedWay {
   refs: number[];
   tags?: Record<string, string>;
 }
+interface ParsedRelationMember {
+  type: 'node' | 'way' | 'relation';
+  ref: number;
+  role: string;
+}
 interface ParsedRelation {
   type: 'relation';
+  id: number;
+  members?: ParsedRelationMember[];
+  tags?: Record<string, string>;
 }
 type ParsedItem = ParsedNode | ParsedWay | ParsedRelation | Record<string, unknown>;
 
 export async function readOsmPbf(path: string, opts: OsmPbfReadOpts = {}): Promise<RawOsm> {
   const nodes: RawOsmNode[] = [];
   const ways: RawOsmWay[] = [];
+  const relations: RawOsmRelation[] = [];
   const keptNodeIds = new Set<number>();
   const clip = opts.clipBbox;
   const interval = opts.progressInterval ?? 100_000;
@@ -89,14 +106,41 @@ export async function readOsmPbf(path: string, opts: OsmPbfReadOpts = {}): Promi
         tags: tagMap(w.tags),
       });
     } else if (t === 'relation') {
-      // ignored in v1
+      const r = item as ParsedRelation;
+      // Only keep relations tagged as something we might assemble into a
+      // polygon (multipolygon water and similar). Pre-filtering here keeps
+      // memory bounded on country-sized PBFs where most relations are
+      // turn restrictions or routes we don't care about.
+      const tags = r.tags ?? {};
+      if (!isInterestingRelation(tags)) continue;
+      const members: RawOsmRelationMember[] = (r.members ?? []).map((m) => ({
+        type: m.type,
+        ref: m.ref,
+        role: m.role,
+      }));
+      relations.push({ id: r.id, members, tags: new Map(Object.entries(tags)) });
     }
     // Header block has no `type` — also ignored.
   }
   if (opts.onProgress) {
     opts.onProgress({ nodes: nodes.length, ways: ways.length });
   }
-  return { nodes, ways };
+  return { nodes, ways, relations };
+}
+
+/**
+ * Cheap pre-filter for PBF relations. Without this every country-sized
+ * Geofabrik extract pulls in millions of turn restrictions and routes we'd
+ * just throw away. Mirrors the categories osmToPack actually consumes
+ * (currently water multipolygons).
+ */
+function isInterestingRelation(tags: Record<string, string>): boolean {
+  if (tags['type'] !== 'multipolygon') return false;
+  if (tags['natural'] === 'water') return true;
+  if (tags['waterway'] === 'riverbank') return true;
+  if (tags['landuse'] === 'reservoir' || tags['landuse'] === 'basin') return true;
+  if (tags['building']) return true;
+  return false;
 }
 
 function tagMap(tags: Record<string, string> | undefined): ReadonlyMap<string, string> {

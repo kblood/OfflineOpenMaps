@@ -42,6 +42,12 @@ export interface PlaceFeature {
   country: string;
   adminPath: string | null;
   altNames?: string;
+  /**
+   * For DK addresses sourced from DAWA: the matrikel/parcel identifier
+   * ("<ejerlavkode>/<matrikelnr>") so the UI can look up and render
+   * the parcel polygon on selection. Other place kinds leave this unset.
+   */
+  parcelId?: string | null;
 }
 
 /**
@@ -62,6 +68,19 @@ export interface WaterPolygon {
   ring: ReadonlyArray<[number, number]>;
 }
 
+/**
+ * A building footprint. Same shape as WaterPolygon — an outer ring,
+ * optionally a name (for prominent landmarks, like train stations or
+ * cathedrals). Heights/levels are intentionally not modeled in v1; that
+ * would invite the rendering complexity of extruded geometry without
+ * solving any user-visible problem yet.
+ */
+export interface BuildingPolygon {
+  id: string;
+  name?: string;
+  ring: ReadonlyArray<[number, number]>;
+}
+
 export interface SyntheticData {
   bbox: [number, number, number, number];
   nodes: ReadonlyArray<{ id: number; lat: number; lon: number }>;
@@ -73,6 +92,33 @@ export interface SyntheticData {
    * but real OSM imports populate it. Empty array is fine.
    */
   waters?: ReadonlyArray<WaterPolygon>;
+  /**
+   * Building footprints. Same optional contract as waters — present in
+   * real OSM imports, absent in synthetic fixtures.
+   */
+  buildings?: ReadonlyArray<BuildingPolygon>;
+  /**
+   * Cadastral parcels (matrikler) bundled from DAWA for DK packs. Each
+   * parcel polygon is keyed by "<ejerlavkode>/<matrikelnr>" and is referenced
+   * by address-kind PlaceFeatures via their `parcelId`. Empty/absent for
+   * non-DK packs.
+   */
+  parcels?: ReadonlyArray<ParcelGeometry>;
+}
+
+/**
+ * A cadastral parcel (matrikel) — same shape as the DAWA fetcher's
+ * ParcelPolygon, but lives in synthetic.ts so the writer doesn't have
+ * to import from the fetcher. Multiple rings supports MultiPolygon
+ * parcels (rare but legal in the registry).
+ */
+export interface ParcelGeometry {
+  id: string;
+  label: string;
+  ejerlavkode: number;
+  ejerlavnavn: string;
+  matrikelnr: string;
+  rings: ReadonlyArray<ReadonlyArray<readonly [number, number]>>;
 }
 
 export function buildFakelandData(): SyntheticData {

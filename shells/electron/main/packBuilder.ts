@@ -14,6 +14,9 @@ import {
   writeGeocodeDb,
   writeManifest,
   chooseAnchors,
+  fetchDawa,
+  applyDawa,
+  snapAddressesToBuildings,
 } from '@openmaps/region-builder';
 import { GEOFABRIK_COUNTRIES, type GeofabrikCountry } from './geofabrikCountries.js';
 
@@ -173,7 +176,7 @@ async function runBuild(
       phase: 'building-graph',
       message: `Building routing graph (${raw.nodes.length.toLocaleString()} nodes, ${raw.ways.length.toLocaleString()} ways)…`,
     });
-    const data = osmToPack(
+    let data = osmToPack(
       raw,
       clipBbox ? { clipBbox: [clipBbox[0], clipBbox[1], clipBbox[2], clipBbox[3]] } : {},
     );
@@ -181,6 +184,39 @@ async function runBuild(
       throw new Error('No routable roads in this area. Pick a larger or more populated region.');
     }
     if (controller.signal.aborted) throw new BuildCancelled();
+
+    // DK packs get DAWA addresses + parcel polygons (authoritative Danish
+    // address registry, daily-updated). On failure we fall through to OSM
+    // addresses so the build still succeeds, just without DAWA's coverage.
+    if (country === 'DK') {
+      emit({ phase: 'building-geocode', message: 'Fetching DAWA addresses + parcels…' });
+      try {
+        const dawa = await fetchDawa({
+          bbox: data.bbox,
+          onProgress: (msg) => emit({ phase: 'building-geocode', message: msg }),
+        });
+        data = applyDawa(data, dawa);
+      } catch (err) {
+        emit({
+          phase: 'building-geocode',
+          message: `DAWA unavailable (${err instanceof Error ? err.message : String(err)}); using OSM addresses`,
+        });
+      }
+      if (controller.signal.aborted) throw new BuildCancelled();
+    }
+
+    // Snap address pins to building centroids when an address falls inside
+    // a building footprint. Pure local step — no network, no I/O.
+    {
+      const snap = snapAddressesToBuildings(data);
+      data = snap.data;
+      if (snap.snapped > 0) {
+        emit({
+          phase: 'building-geocode',
+          message: `Snapped ${snap.snapped.toLocaleString()} address pins to buildings`,
+        });
+      }
+    }
 
     // Write into a staging dir, then move to the final packs dir on
     // success. That way a cancelled or failed build never leaves a
@@ -282,18 +318,32 @@ async function fetchOverpass(
   const west = minLon;
   const north = maxLat;
   const east = maxLon;
+  // Address fetching: OSM tags addresses two ways. Most commonly the
+  // building outline (a closed way) carries addr:housenumber + addr:street
+  // (Karlsruhe-on-building); less commonly a standalone node carries them.
+  // We fetch both. Without these clauses the geocode FTS has no addresses
+  // to index even though osmToPack knows how to emit them.
   const query = `[out:xml][timeout:180];
 (
   way["highway"](${south},${west},${north},${east});
   way["natural"="water"](${south},${west},${north},${east});
+  way["natural"="coastline"](${south},${west},${north},${east});
   way["waterway"="riverbank"](${south},${west},${north},${east});
   way["waterway"="dock"](${south},${west},${north},${east});
   way["landuse"="reservoir"](${south},${west},${north},${east});
   way["landuse"="basin"](${south},${west},${north},${east});
+  way["addr:housenumber"](${south},${west},${north},${east});
+  way["building"](${south},${west},${north},${east});
+  relation["type"="multipolygon"]["building"](${south},${west},${north},${east});
+  relation["type"="multipolygon"]["natural"="water"](${south},${west},${north},${east});
+  relation["type"="multipolygon"]["waterway"="riverbank"](${south},${west},${north},${east});
+  relation["type"="multipolygon"]["landuse"="reservoir"](${south},${west},${north},${east});
+  relation["type"="multipolygon"]["landuse"="basin"](${south},${west},${north},${east});
   node["place"](${south},${west},${north},${east});
   node["amenity"]["name"](${south},${west},${north},${east});
   node["shop"]["name"](${south},${west},${north},${east});
   node["tourism"]["name"](${south},${west},${north},${east});
+  node["addr:housenumber"](${south},${west},${north},${east});
 );
 out body;
 >;

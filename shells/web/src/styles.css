@@ -1,0 +1,339 @@
+@import 'maplibre-gl/dist/maplibre-gl.css';
+
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: #0f1419;
+  color: #e6edf3;
+  overflow: hidden;
+}
+
+/* Theme variables — only `default` is wired up in the web MVP; the dark
+   and mono themes will follow when the theme switcher lands. */
+.app {
+  --bg-sidebar: #f6f5ef;
+  --bg-panel-header: #ebe9e0;
+  --bg-input: #ffffff;
+  --bg-button: #ffffff;
+  --bg-button-hover: #f0eee5;
+  --bg-list: #ffffff;
+  --border: #d2cfc4;
+  --text: #1f2328;
+  --text-muted: #6a6f78;
+  --primary: #2566e6;
+  --primary-text: #ffffff;
+  --danger: #d8443a;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  height: 100vh;
+  background: #ffffff;
+  color: var(--text);
+}
+
+.sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Hamburger + backdrop are mobile-only — hidden on the desktop grid layout
+   and revealed by the @media block at the bottom of this file. */
+.sidebar-toggle {
+  display: none;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.badge {
+  font-size: 10px;
+  background: var(--primary);
+  color: var(--primary-text);
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.panel {
+  background: var(--bg-list);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+.panel h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+button {
+  font: inherit;
+  background: var(--bg-button);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: var(--bg-button-hover);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+button.primary {
+  background: var(--primary);
+  color: var(--primary-text);
+  border-color: var(--primary);
+}
+
+input[type='text'] {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 10px;
+}
+
+.result-list {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-list);
+}
+
+.result-list li {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.result-list li:last-child {
+  border-bottom: none;
+}
+
+.result-list li:hover {
+  background: var(--bg-button-hover);
+}
+
+.result-list .kind {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.map-pane {
+  position: relative;
+  overflow: hidden;
+}
+
+.map-pane.crosshair,
+.map-pane.crosshair .map,
+.map-pane.crosshair .maplibregl-canvas {
+  cursor: crosshair !important;
+}
+
+.map {
+  position: absolute;
+  inset: 0;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  height: 100%;
+  text-align: center;
+  color: var(--text-muted);
+  padding: 32px;
+}
+
+.empty-state h2 {
+  margin: 0 0 8px;
+  color: var(--text);
+}
+
+.footer {
+  margin-top: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 8px 4px 0;
+}
+
+code {
+  background: #ebe9e0;
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+
+.progress {
+  height: 4px;
+  background: var(--bg-button-hover);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.15s ease-out;
+}
+
+/* Two-line waypoint button (route panel A/B). The .primary modifier is
+   already styled above; we just make sure the inner lines align nicely. */
+button.waypoint {
+  padding: 8px 10px;
+  line-height: 1.2;
+}
+
+button.waypoint.primary > div:last-child {
+  color: rgba(255, 255, 255, 0.75);
+}
+
+/* Mobile breakpoint. Anything ≤720px (most phones in portrait, narrow
+   tablets) switches to a single-column layout with the sidebar as a
+   slide-in drawer. Desktop is unaffected. 720 was chosen so a 7" tablet
+   in portrait still gets the desktop layout where the sidebar fits. */
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .map-pane {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: 88%;
+    max-width: 360px;
+    z-index: 30;
+    box-shadow: 4px 0 16px rgba(0, 0, 0, 0.25);
+    transform: translateX(-100%);
+    transition: transform 0.2s ease-out;
+    /* Larger gap because the sidebar now stretches full-height with more
+       content visible at once. */
+    gap: 14px;
+    padding: 14px;
+  }
+
+  .app.sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 20;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease-out;
+  }
+
+  .app.sidebar-open .sidebar-backdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .sidebar-toggle {
+    display: block;
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    z-index: 40;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    background: var(--bg-sidebar);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font-size: 20px;
+    line-height: 1;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+  }
+
+  /* Larger tap targets across the board — 44px is the standard
+     touch-friendly minimum on iOS and Android guidelines. */
+  button {
+    padding: 10px 12px;
+    min-height: 40px;
+  }
+
+  input[type='text'] {
+    padding: 10px 12px;
+    font-size: 16px; /* Prevents iOS Safari from auto-zooming on focus */
+    min-height: 40px;
+  }
+
+  /* Search results: full-width, taller rows, more breathing room. */
+  .result-list {
+    max-height: 50vh;
+  }
+
+  .result-list li {
+    padding: 12px 14px;
+    font-size: 15px;
+  }
+
+  .result-list .kind {
+    font-size: 12px;
+    margin-top: 4px;
+  }
+
+  /* Route panel: roomier waypoint buttons, taller turn-by-turn list. */
+  button.waypoint {
+    padding: 10px 12px;
+    min-height: 52px;
+  }
+}

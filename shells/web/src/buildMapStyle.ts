@@ -43,9 +43,7 @@ export const MAP_THEMES: ReadonlyArray<{ id: MapTheme; label: string; descriptio
 interface Palette {
   bg: string;
   water: string;
-  /** Building footprint fill — a touch darker than the bg. */
   buildingFill: string;
-  /** Building footprint outline — darker still, for rectangle definition. */
   buildingStroke: string;
   roadCasing: string;
   road: string;
@@ -191,10 +189,8 @@ export function buildMapStyle(
       },
       // ─── Building footprints ───────────────────────────────────────
       // Drawn between water and roads so the road network paints over
-      // the corners where a residential street trims a building's
-      // bounding box. Fill + thin outline. minzoom=13 mirrors what
-      // writeMbtiles actually emits — at lower zooms individual
-      // buildings would be sub-pixel and just smear the tile out.
+      // building corners at junctions. Fill + thin outline. minzoom=13
+      // mirrors what writeMbtiles actually emits.
       {
         id: 'buildings-fill',
         type: 'fill',

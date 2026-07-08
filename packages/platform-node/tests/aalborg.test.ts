@@ -45,6 +45,10 @@ let packsDir: string;
 beforeAll(async () => {
   if (!fixtureExists) return;
   packsDir = await mkdtemp(join(tmpdir(), 'openmaps-v2-aalborg-'));
+  // Pass --bbox matching the bbox used by scripts/fetch-aalborg.mjs. Without
+  // a clip bbox, osmToPack skips the coastline→sea-polygon closure step,
+  // so Limfjorden renders blank — a regression we caught the hard way once
+  // and pin down here for next time.
   execFileSync(
     'node',
     [
@@ -58,6 +62,8 @@ beforeAll(async () => {
       'Aalborg',
       '--country',
       'DK',
+      '--bbox',
+      '9.82,56.99,10.05,57.10',
       '--out',
       packsDir,
     ],

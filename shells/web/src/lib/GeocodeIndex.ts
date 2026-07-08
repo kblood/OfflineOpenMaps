@@ -1,4 +1,3 @@
-import { DatabaseSync, type StatementSync } from 'node:sqlite';
 import type {
   GeocodeIndex,
   Parcel,
@@ -8,40 +7,30 @@ import type {
   SearchOptions,
   SearchResult,
 } from '@openmaps/core';
+import type { WebDb, Stmt } from './sqlite.js';
 
 /**
- * Reads a geocode.sqlite produced by region-builder. Schema:
- *
- *   places(id, display_name, kind, lat, lon, country, admin_path)
- *   places_fts USING fts5(display_name, alt_names, admin_path, content='places')
- *   places_rtree USING rtree(id, min_lat, max_lat, min_lon, max_lon)
- *
- *   roads(id, name, kind)   -- kind ∈ {'street','road'}
- *   roads_rtree USING rtree(id, min_lat, max_lat, min_lon, max_lon)
- *
- * Forward search uses FTS5 with bm25 ranking, biased by distance to viewport
- * center when viewport is given.
- * Reverse uses R*Tree to fetch candidate features within a meters-bounded
- * bbox, then sorts by haversine distance.
+ * Browser port of packages/platform-node/src/SqliteGeocodeIndex.ts. The
+ * tokenizer, scoring, and reverse-geocoding algorithm are unchanged; only
+ * the SQLite handle differs.
  */
-export class SqliteGeocodeIndex implements GeocodeIndex {
-  private readonly db: DatabaseSync;
-  private readonly searchStmt: StatementSync;
-  private readonly reverseEdgesStmt: StatementSync;
-  private readonly reversePlacesStmt: StatementSync;
-  private readonly parcelStmt: StatementSync | null;
+export class WebGeocodeIndex implements GeocodeIndex {
+  private readonly db: WebDb;
+  private readonly searchStmt: Stmt;
+  private readonly reverseEdgesStmt: Stmt;
+  private readonly reversePlacesStmt: Stmt;
+  private readonly parcelStmt: Stmt | null;
+  private readonly hasParcelIdColumn: boolean;
 
-  constructor(filePath: string) {
-    this.db = new DatabaseSync(filePath, { readOnly: true });
-    this.db.exec('PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;');
-
-    // FTS5 MATCH returns rowid; join back to places. Lower bm25 = better.
-    // `parcel_id` is only populated for DAWA-augmented packs; older packs
-    // built without the column return NULL via the COALESCE on the column
-    // type — but for legacy packs lacking the column entirely we accept
-    // the prepare to fail and re-prepare without it.
-    this.searchStmt = this.db.prepare(this.placesHasColumn('parcel_id')
-      ? `
+  constructor(db: WebDb) {
+    this.db = db;
+    // Older packs (pre-DAWA) lack the parcel_id column and the parcels
+    // table entirely. Detect and degrade gracefully so we can still read
+    // them as plain geocode indexes.
+    this.hasParcelIdColumn = placesHasColumn(db, 'parcel_id');
+    this.searchStmt = db.prepare(
+      this.hasParcelIdColumn
+        ? `
       SELECT p.id AS id, p.display_name AS display_name, p.kind AS kind,
              p.lat AS lat, p.lon AS lon, p.country AS country,
              p.admin_path AS admin_path, p.parcel_id AS parcel_id,
@@ -52,7 +41,7 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
       ORDER BY rank_score
       LIMIT ?
     `
-      : `
+        : `
       SELECT p.id AS id, p.display_name AS display_name, p.kind AS kind,
              p.lat AS lat, p.lon AS lon, p.country AS country,
              p.admin_path AS admin_path, NULL AS parcel_id,
@@ -62,21 +51,16 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
       WHERE places_fts MATCH ?
       ORDER BY rank_score
       LIMIT ?
-    `);
-
-    this.parcelStmt = this.parcelsTableExists()
-      ? this.db.prepare(`
+    `,
+    );
+    this.parcelStmt = parcelsTableExists(db)
+      ? db.prepare(`
           SELECT id, label, ejerlavkode, ejerlavnavn, matrikelnr, rings_json
           FROM parcels WHERE id = ?
         `)
       : null;
 
-    // Reverse query splits into two passes:
-    //   1. Edges with both endpoints, so we can compute perpendicular-to-
-    //      segment distance instead of bbox-center distance. The R*Tree
-    //      bbox is expanded by the search radius before this query is run.
-    //   2. Places (POIs/admin/place) with their point coordinates.
-    this.reverseEdgesStmt = this.db.prepare(`
+    this.reverseEdgesStmt = db.prepare(`
       SELECT CAST(e.id AS TEXT) AS id,
              e.road_name AS display_name,
              n1.lat AS lat1, n1.lon AS lon1,
@@ -89,7 +73,7 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
         AND er.max_lon >= ? AND er.min_lon <= ?
         AND e.road_name IS NOT NULL
     `);
-    this.reversePlacesStmt = this.db.prepare(`
+    this.reversePlacesStmt = db.prepare(`
       SELECT p.id AS id, p.display_name AS display_name, p.kind AS kind,
              p.lat AS lat, p.lon AS lon
       FROM places_rtree pr JOIN places p ON p.rowid = pr.id
@@ -113,20 +97,9 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
     tokens[lastIdx] = tokens[lastIdx] + '*';
     const ftsQuery = tokens.join(' AND ');
 
-    type Row = {
-      id: string;
-      display_name: string;
-      kind: PlaceKind;
-      lat: number;
-      lon: number;
-      country: string;
-      admin_path: string | null;
-      parcel_id: string | null;
-      rank_score: number;
-    };
-    let rows: Row[];
+    let rows: ReturnType<Stmt['all']>;
     try {
-      rows = this.searchStmt.all(ftsQuery, limit * 3) as unknown as Row[];
+      rows = this.searchStmt.all(ftsQuery, limit * 3);
     } catch {
       return [];
     }
@@ -137,7 +110,7 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
             const [minLon, minLat, maxLon, maxLat] = opts.viewport!;
             const cx = (minLon + maxLon) / 2;
             const cy = (minLat + maxLat) / 2;
-            return (lat: number, lon: number) => {
+            return (lat: number, lon: number): number => {
               const dx = lon - cx;
               const dy = lat - cy;
               return Math.sqrt(dx * dx + dy * dy);
@@ -146,10 +119,21 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
         : null;
 
     const scored = rows
+      .map((r) => ({
+        id: String(r['id']),
+        displayName: String(r['display_name']),
+        kind: String(r['kind']) as PlaceKind,
+        lat: Number(r['lat']),
+        lon: Number(r['lon']),
+        country: String(r['country']),
+        adminPath: r['admin_path'] != null ? String(r['admin_path']) : null,
+        parcelId: r['parcel_id'] != null ? String(r['parcel_id']) : null,
+        rankScore: Number(r['rank_score']),
+      }))
       .filter((r) => !opts.kind || r.kind === opts.kind)
       .map((r) => {
         const dist = bias ? bias(r.lat, r.lon) : 0;
-        const composite = -r.rank_score - dist * 0.5;
+        const composite = -r.rankScore - dist * 0.5;
         return { row: r, composite };
       })
       .sort((a, b) => b.composite - a.composite)
@@ -158,57 +142,43 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
     const maxScore = scored[0]?.composite ?? 1;
     return scored.map(({ row, composite }) => ({
       id: row.id,
-      displayName: row.display_name,
+      displayName: row.displayName,
       kind: row.kind,
       lat: row.lat,
       lon: row.lon,
       country: row.country,
-      ...(row.admin_path ? { adminPath: row.admin_path } : {}),
-      ...(row.parcel_id ? { parcelId: row.parcel_id } : {}),
+      ...(row.adminPath ? { adminPath: row.adminPath } : {}),
+      ...(row.parcelId ? { parcelId: row.parcelId } : {}),
       score: maxScore > 0 ? composite / maxScore : 0,
     }));
   }
 
   async getParcel(parcelId: string): Promise<Parcel | null> {
     if (!this.parcelStmt) return null;
-    type Row = {
-      id: string;
-      label: string;
-      ejerlavkode: number | null;
-      ejerlavnavn: string | null;
-      matrikelnr: string | null;
-      rings_json: string;
-    };
-    const row = this.parcelStmt.get(parcelId) as Row | undefined;
-    if (!row) return null;
+    let rows: ReturnType<Stmt['all']>;
+    try {
+      rows = this.parcelStmt.all(parcelId);
+    } catch {
+      return null;
+    }
+    const r = rows[0];
+    if (!r) return null;
     let rings: ReadonlyArray<ReadonlyArray<readonly [number, number]>>;
     try {
-      rings = JSON.parse(row.rings_json) as ReadonlyArray<ReadonlyArray<readonly [number, number]>>;
+      rings = JSON.parse(String(r['rings_json'])) as ReadonlyArray<
+        ReadonlyArray<readonly [number, number]>
+      >;
     } catch {
       return null;
     }
     return {
-      id: row.id,
-      label: row.label,
-      ejerlavkode: row.ejerlavkode,
-      ejerlavnavn: row.ejerlavnavn,
-      matrikelnr: row.matrikelnr,
+      id: String(r['id']),
+      label: String(r['label']),
+      ejerlavkode: r['ejerlavkode'] != null ? Number(r['ejerlavkode']) : null,
+      ejerlavnavn: r['ejerlavnavn'] != null ? String(r['ejerlavnavn']) : null,
+      matrikelnr: r['matrikelnr'] != null ? String(r['matrikelnr']) : null,
       rings,
     };
-  }
-
-  private placesHasColumn(name: string): boolean {
-    type Row = { name: string };
-    const cols = this.db.prepare(`PRAGMA table_info(places)`).all() as unknown as Row[];
-    return cols.some((c) => c.name === name);
-  }
-
-  private parcelsTableExists(): boolean {
-    type Row = { name: string };
-    const rows = this.db
-      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='parcels'`)
-      .all() as unknown as Row[];
-    return rows.length > 0;
   }
 
   async reverse(lat: number, lon: number, opts: ReverseOptions = {}): Promise<ReverseResult | null> {
@@ -217,34 +187,8 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
     const dLat = maxR / 111_320;
     const dLon = maxR / (111_320 * Math.cos((lat * Math.PI) / 180));
 
-    type EdgeRow = {
-      id: string;
-      display_name: string;
-      lat1: number;
-      lon1: number;
-      lat2: number;
-      lon2: number;
-    };
-    type PlaceRow = {
-      id: string;
-      display_name: string;
-      kind: PlaceKind;
-      lat: number;
-      lon: number;
-    };
-
-    const edgeRows = this.reverseEdgesStmt.all(
-      lat - dLat,
-      lat + dLat,
-      lon - dLon,
-      lon + dLon,
-    ) as unknown as ReadonlyArray<EdgeRow>;
-    const placeRows = this.reversePlacesStmt.all(
-      lat - dLat,
-      lat + dLat,
-      lon - dLon,
-      lon + dLon,
-    ) as unknown as ReadonlyArray<PlaceRow>;
+    const edgeRows = this.reverseEdgesStmt.all(lat - dLat, lat + dLat, lon - dLon, lon + dLon);
+    const placeRows = this.reversePlacesStmt.all(lat - dLat, lat + dLat, lon - dLon, lon + dLon);
 
     type Candidate = {
       source: 'road' | 'place';
@@ -255,26 +199,44 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
     const candidates: Candidate[] = [];
 
     for (const e of edgeRows) {
-      const d = pointToSegmentMeters(lat, lon, e.lat1, e.lon1, e.lat2, e.lon2);
+      const d = pointToSegmentMeters(
+        lat,
+        lon,
+        Number(e['lat1']),
+        Number(e['lon1']),
+        Number(e['lat2']),
+        Number(e['lon2']),
+      );
       if (d <= maxR) {
-        candidates.push({ source: 'road', displayName: e.display_name, kind: 'street', distM: d });
+        candidates.push({
+          source: 'road',
+          displayName: String(e['display_name']),
+          kind: 'street',
+          distM: d,
+        });
       }
     }
     for (const p of placeRows) {
-      const d = haversineMeters(lat, lon, p.lat, p.lon);
+      const d = haversineMeters(lat, lon, Number(p['lat']), Number(p['lon']));
       if (d <= maxR) {
-        candidates.push({ source: 'place', displayName: p.display_name, kind: p.kind, distM: d });
+        candidates.push({
+          source: 'place',
+          displayName: String(p['display_name']),
+          kind: String(p['kind']) as PlaceKind,
+          distM: d,
+        });
       }
     }
 
     if (candidates.length === 0) return null;
 
     // Three-tier kind preference. With preferRoads=true (default, used by
-    // the click-to-inspect popup) road context wins ("you're near
-    // Strandvejen"). With preferRoads=false (used by route-waypoint
-    // lookups) an address-kind place wins, with the road as a strong
-    // second and other place kinds (POI, admin, city) further behind.
-    // The boosts are small enough that a much closer candidate still wins.
+    // the click-to-inspect popup) we want road context first ("you're near
+    // Strandvejen"). With preferRoads=false (used by route-waypoint lookups)
+    // we want the most specific destination — an address-kind place beats a
+    // road by 15 m, and a generic place (POI/admin/city) is still ranked
+    // below the road. The numbers are small enough that a much closer
+    // candidate still wins.
     const scored = candidates
       .map((c) => {
         let kindBoost: number;
@@ -298,7 +260,27 @@ export class SqliteGeocodeIndex implements GeocodeIndex {
   }
 
   async close(): Promise<void> {
-    this.db.close();
+    // The DB is owned by the pack loader (shared with the router), not us.
+  }
+}
+
+function placesHasColumn(db: WebDb, name: string): boolean {
+  try {
+    const rows = db.prepare(`PRAGMA table_info(places)`).all();
+    return rows.some((r) => String(r['name']) === name);
+  } catch {
+    return false;
+  }
+}
+
+function parcelsTableExists(db: WebDb): boolean {
+  try {
+    const rows = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='parcels'`)
+      .all();
+    return rows.length > 0;
+  } catch {
+    return false;
   }
 }
 
@@ -317,15 +299,6 @@ function haversineMeters(la1: number, lo1: number, la2: number, lo2: number): nu
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
-/**
- * Distance from point P to segment AB, in meters. Uses an equirectangular
- * projection around P's latitude (cos(lat) scaling for longitude) — accurate
- * to a fraction of a percent for the distances we reverse-geocode at (<1km).
- *
- * Algorithm: project AB and AP into a local (x = lon·cosLat, y = lat) frame,
- * find the closest point on AB, then convert the residual back to meters via
- * haversine using that foot-of-perpendicular.
- */
 function pointToSegmentMeters(
   pLat: number,
   pLon: number,

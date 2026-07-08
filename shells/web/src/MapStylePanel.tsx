@@ -8,12 +8,6 @@ interface Props {
   onTogglesChange(toggles: LayerToggles): void;
 }
 
-/**
- * Compact panel that lets the user pick a theme (light/dark/mono) and
- * toggle the visibility of individual layer groups. Theme changes call
- * `map.setStyle()` under the hood; toggle changes feed into the same
- * style rebuild. Both are persisted by the parent into localStorage.
- */
 export function MapStylePanel({ theme, onThemeChange, toggles, onTogglesChange }: Props): JSX.Element {
   return (
     <div className="panel">
@@ -31,7 +25,7 @@ export function MapStylePanel({ theme, onThemeChange, toggles, onTogglesChange }
           </button>
         ))}
       </div>
-      <div style={{ fontSize: 12, color: '#666', marginBottom: 6 }}>Show layers</div>
+      <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 6 }}>Show layers</div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
         <label>
           <input

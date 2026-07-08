@@ -1,0 +1,44 @@
+# OpenMaps v2 — Apache config for the cloud-static deploy at
+# https://dionysus.dk/openmaps/. Mirrors the IWSDK pattern in
+# C:\LLM\IWSDK\deploy\.htaccess but trimmed to what the web shell
+# actually serves (no .glb, no .ktx2 — those are IWSDK-only).
+
+# Cache-busting: force browsers to revalidate JS/HTML/JSON on every load
+# so deploys take effect immediately. Without this, an aggressive cache
+# can make a fresh upload look like nothing happened. Pack data files
+# (.mbtiles, .sqlite) are also revalidated — a rebuild keeps the same
+# URL by default, so without this rule a browser would happily serve
+# yesterday's pack from disk for hours.
+<IfModule mod_headers.c>
+  <FilesMatch "\.(js|mjs|html|json|mbtiles|sqlite)$">
+    Header set Cache-Control "no-cache, must-revalidate"
+  </FilesMatch>
+</IfModule>
+
+# MIME types Apache may not know by default.
+#   .wasm    — sqlite-wasm runtime
+#   .pbf     — MapLibre glyph protobuf-tile files (one per font range)
+#   .mbtiles — SQLite vector tile container (only needed if you ever
+#              host packs on the server; MVP loads from the user's disk)
+#   .sqlite  — pack geocode db (same caveat as .mbtiles)
+AddType application/wasm        .wasm
+AddType application/x-protobuf  .pbf
+AddType application/vnd.sqlite3 .mbtiles
+AddType application/vnd.sqlite3 .sqlite
+
+# Long-lived hashed assets — Vite emits content-hashed filenames in
+# /assets/, so they're safe to cache aggressively.
+<IfModule mod_headers.c>
+  <FilesMatch "\.(woff2?|ttf|pbf|png|jpg|jpeg|webp|wasm)$">
+    Header set Cache-Control "public, max-age=604800, immutable"
+  </FilesMatch>
+</IfModule>
+
+# Cross-origin isolation. Uncomment when the web shell starts using
+# OPFS sync-access or any SharedArrayBuffer-backed worker — sqlite-wasm's
+# OPFS persistence variant requires both headers. Leaving them off for
+# the MVP keeps the live page simpler to embed and debug.
+# <IfModule mod_headers.c>
+#   Header set Cross-Origin-Opener-Policy "same-origin"
+#   Header set Cross-Origin-Embedder-Policy "require-corp"
+# </IfModule>

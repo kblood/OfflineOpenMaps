@@ -30,25 +30,39 @@ const NORTH = 57.10;
 const EAST = 10.05;
 
 // Overpass QL — fetch highway ways + water polygons + named POIs + admin
-// places, then recurse (`>;`) to include every referenced node. `out:xml`
-// so it lands in the same format our XML reader handles. Water types
-// covered: lakes/ponds (natural=water), river polygons
+// places + addresses, then recurse (`>;`) to include every referenced
+// node. `out:xml` so it lands in the same format our XML reader handles.
+// Water types covered: lakes/ponds (natural=water), river polygons
 // (waterway=riverbank), harbour docks (waterway=dock), reservoirs and
-// basins. Coastlines (`natural=coastline`) are open ways, not polygons,
-// so they're handled separately at the renderer level via a sea
-// background — not included here.
+// basins. Coastlines (`natural=coastline`) are open ways and the
+// Limfjord is modelled via multipolygon relations — neither are
+// handled by the readers yet, so the fjord renders blank for now.
+//
+// Addresses are tagged the OSM "Karlsruhe" way: building outlines (way
+// + addr:housenumber + addr:street) for the common case, plus standalone
+// addr:housenumber nodes. Both clauses below — without them the geocode
+// FTS has no addresses to index even though osmToPack knows how to emit them.
 const query = `[out:xml][timeout:180];
 (
   way["highway"](${SOUTH},${WEST},${NORTH},${EAST});
   way["natural"="water"](${SOUTH},${WEST},${NORTH},${EAST});
+  way["natural"="coastline"](${SOUTH},${WEST},${NORTH},${EAST});
   way["waterway"="riverbank"](${SOUTH},${WEST},${NORTH},${EAST});
   way["waterway"="dock"](${SOUTH},${WEST},${NORTH},${EAST});
   way["landuse"="reservoir"](${SOUTH},${WEST},${NORTH},${EAST});
   way["landuse"="basin"](${SOUTH},${WEST},${NORTH},${EAST});
+  way["addr:housenumber"](${SOUTH},${WEST},${NORTH},${EAST});
+  way["building"](${SOUTH},${WEST},${NORTH},${EAST});
+  relation["type"="multipolygon"]["building"](${SOUTH},${WEST},${NORTH},${EAST});
+  relation["type"="multipolygon"]["natural"="water"](${SOUTH},${WEST},${NORTH},${EAST});
+  relation["type"="multipolygon"]["waterway"="riverbank"](${SOUTH},${WEST},${NORTH},${EAST});
+  relation["type"="multipolygon"]["landuse"="reservoir"](${SOUTH},${WEST},${NORTH},${EAST});
+  relation["type"="multipolygon"]["landuse"="basin"](${SOUTH},${WEST},${NORTH},${EAST});
   node["place"](${SOUTH},${WEST},${NORTH},${EAST});
   node["amenity"]["name"](${SOUTH},${WEST},${NORTH},${EAST});
   node["shop"]["name"](${SOUTH},${WEST},${NORTH},${EAST});
   node["tourism"]["name"](${SOUTH},${WEST},${NORTH},${EAST});
+  node["addr:housenumber"](${SOUTH},${WEST},${NORTH},${EAST});
 );
 out body;
 >;

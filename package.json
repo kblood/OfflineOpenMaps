@@ -5,7 +5,7 @@
   "description": "Offline-first mapping app. Rewrite of OpenMaps with verifiable offline guarantees.",
   "workspaces": [
     "packages/*",
-    "shells/electron",
+    "shells/*",
     "e2e"
   ],
   "scripts": {

@@ -33,7 +33,17 @@ export function writeGeocodeDb(outPath: string, data: SyntheticData): void {
         lat REAL NOT NULL,
         lon REAL NOT NULL,
         country TEXT NOT NULL,
-        admin_path TEXT
+        admin_path TEXT,
+        parcel_id TEXT
+      );
+
+      CREATE TABLE parcels (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        ejerlavkode INTEGER,
+        ejerlavnavn TEXT,
+        matrikelnr TEXT,
+        rings_json TEXT NOT NULL
       );
 
       CREATE VIRTUAL TABLE places_fts USING fts5(
@@ -77,8 +87,8 @@ export function writeGeocodeDb(outPath: string, data: SyntheticData): void {
     db.exec('BEGIN');
 
     const insertPlace = db.prepare(`
-      INSERT INTO places (id, display_name, kind, lat, lon, country, admin_path)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO places (id, display_name, kind, lat, lon, country, admin_path, parcel_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const insertPlaceFts = db.prepare(`
       INSERT INTO places_fts (rowid, display_name, alt_names, admin_path)
@@ -95,10 +105,36 @@ export function writeGeocodeDb(outPath: string, data: SyntheticData): void {
     const placeRowidByStringId = new Map<string, number>();
     for (const p of data.places) {
       placeRowid += 1;
-      insertPlace.run(p.id, p.displayName, p.kind, p.lat, p.lon, p.country, p.adminPath);
+      insertPlace.run(
+        p.id,
+        p.displayName,
+        p.kind,
+        p.lat,
+        p.lon,
+        p.country,
+        p.adminPath,
+        p.parcelId ?? null,
+      );
       insertPlaceFts.run(placeRowid, p.displayName, p.altNames ?? '', p.adminPath ?? '');
       insertPlaceRtree.run(placeRowid, p.lat, p.lat, p.lon, p.lon);
       placeRowidByStringId.set(p.id, placeRowid);
+    }
+
+    if (data.parcels && data.parcels.length > 0) {
+      const insertParcel = db.prepare(`
+        INSERT INTO parcels (id, label, ejerlavkode, ejerlavnavn, matrikelnr, rings_json)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+      for (const parcel of data.parcels) {
+        insertParcel.run(
+          parcel.id,
+          parcel.label,
+          parcel.ejerlavkode,
+          parcel.ejerlavnavn,
+          parcel.matrikelnr,
+          JSON.stringify(parcel.rings),
+        );
+      }
     }
 
     const insertNode = db.prepare('INSERT INTO nodes (id, lat, lon) VALUES (?, ?, ?)');

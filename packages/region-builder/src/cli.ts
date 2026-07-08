@@ -9,6 +9,8 @@ import { readOsmXml } from './osmXmlReader.js';
 import { readOsmPbf } from './osmPbfReader.js';
 import { osmToPack } from './osmToPack.js';
 import { chooseAnchors } from './chooseAnchors.js';
+import { fetchDawa, applyDawa } from './dawaFetcher.js';
+import { snapAddressesToBuildings } from './snapAddresses.js';
 import type { SyntheticData } from './synthetic.js';
 
 interface CliArgs {
@@ -170,6 +172,39 @@ Examples:
   if (data.nodes.length === 0 || data.edges.length === 0) {
     process.stderr.write('Refusing to build pack: empty graph (no routable roads found).\n');
     process.exit(3);
+  }
+
+  // DK packs swap their OSM-derived addresses for DAWA (the official Danish
+  // address registry — full coverage, daily-updated, parcel polygons included).
+  // Other countries keep OSM addresses; we can broaden this when another
+  // country's authoritative registry is wired up.
+  if (country === 'DK') {
+    process.stdout.write('  - augmenting with DAWA (authoritative DK addresses)\n');
+    try {
+      const dawa = await fetchDawa({
+        bbox: data.bbox,
+        onProgress: (msg) => process.stdout.write(`    ${msg}\n`),
+      });
+      data = applyDawa(data, dawa);
+      process.stdout.write(
+        `  - DAWA: ${dawa.addresses.length} addresses, ${dawa.parcels.length} parcels\n`,
+      );
+    } catch (err) {
+      process.stderr.write(
+        `  - DAWA fetch failed (continuing with OSM addresses): ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  // Snap address pins to the centroid of their containing building footprint
+  // when one exists. Runs for every pack with buildings — independent of
+  // country / source — so it helps OSM-only packs too.
+  {
+    const { data: snappedData, snapped } = snapAddressesToBuildings(data);
+    data = snappedData;
+    if (snapped > 0) {
+      process.stdout.write(`  - snapped ${snapped} address pins to building centroids\n`);
+    }
   }
 
   process.stdout.write('  - writing tiles.mbtiles\n');

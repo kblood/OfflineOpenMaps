@@ -15,7 +15,29 @@ export interface RawOsmWay {
   tags: ReadonlyMap<string, string>;
 }
 
+/**
+ * Member of a relation. We only care about way members in role outer/inner
+ * for multipolygon polygon assembly; node members and other roles are kept
+ * for completeness but ignored downstream.
+ */
+export interface RawOsmRelationMember {
+  type: 'node' | 'way' | 'relation';
+  ref: number;
+  role: string;
+}
+
+export interface RawOsmRelation {
+  id: number;
+  members: ReadonlyArray<RawOsmRelationMember>;
+  tags: ReadonlyMap<string, string>;
+}
+
 export interface RawOsm {
   nodes: ReadonlyArray<RawOsmNode>;
   ways: ReadonlyArray<RawOsmWay>;
+  /**
+   * Relations are optional — older readers may omit them entirely, in which
+   * case `osmToPack` simply emits no relation-derived water polygons.
+   */
+  relations?: ReadonlyArray<RawOsmRelation>;
 }
