@@ -29,7 +29,9 @@
 param(
   [string]$PacksDir = '',
   [string]$OnlyPack = '',
-  [string]$CollectionsDir = ''
+  [string]$CollectionsDir = '',
+  [string]$RoutingDir = '',
+  [switch]$SkipPacks
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,6 +46,9 @@ if (-not $PacksDir) {
 }
 if (-not $CollectionsDir) {
   $CollectionsDir = Join-Path $Root 'config'
+}
+if (-not $RoutingDir) {
+  $RoutingDir = Join-Path $Root 'routing'
 }
 $Target = "${RemoteUser}@${RemoteHost}"
 
@@ -145,11 +150,62 @@ if (Test-Path $CollectionsDir) {
   }
 }
 
+# National routing companions are deliberately separate from map packs. They
+# are uploaded under packs/routing/ and advertised in the same atomic catalog,
+# allowing the web shell to download and checksum-verify them independently.
+$routingBundles = @()
+if (Test-Path $RoutingDir) {
+  Get-ChildItem -Path $RoutingDir -Filter '*.json' -File | ForEach-Object {
+    $descriptorPath = $_.FullName
+    $descriptor = (Get-Content $descriptorPath -Raw | ConvertFrom-Json)
+    $fileName = [string]$descriptor.file.path
+    $sqlitePath = Join-Path $RoutingDir $fileName
+    if (-not $descriptor.id -or -not $fileName -or -not (Test-Path $sqlitePath)) {
+      Write-Warning "Skipping routing descriptor $($_.Name): missing id or database file"
+      return
+    }
+    $actualBytes = (Get-Item $sqlitePath).Length
+    if ($actualBytes -ne [int64]$descriptor.file.bytes) {
+      throw "Routing companion $($descriptor.id) size mismatch: descriptor=$($descriptor.file.bytes), actual=$actualBytes"
+    }
+    $routingBundles += [PSCustomObject]@{
+      id          = [string]$descriptor.id
+      name        = [string]$descriptor.name
+      country     = [string]$descriptor.country
+      bbox        = $descriptor.bbox
+      baseUrl     = 'routing/'
+      file        = $descriptor.file
+      profiles    = @($descriptor.profiles)
+      description = [string]$descriptor.description
+      _descriptor = $descriptorPath
+      _database   = $sqlitePath
+    }
+  }
+}
+
 # Ensure the remote root exists.
 Invoke-Ssh "mkdir -p '$RemoteBase'"
 
+foreach ($bundle in $routingBundles) {
+  Write-Host ""
+  Write-Host "=== Uploading routing companion $($bundle.id) ($([Math]::Round($bundle.file.bytes / 1MB, 1)) MB) ===" -ForegroundColor Cyan
+  $routingStaging = "$RemoteBase/.staging-routing-$($bundle.id)-$([guid]::NewGuid().ToString().Substring(0, 8))"
+  $routingLive = "$RemoteBase/routing"
+  $routingOld = "$routingLive.old-$([guid]::NewGuid().ToString().Substring(0, 8))"
+  Invoke-Ssh "mkdir -p '$routingStaging'"
+  Invoke-Scp $bundle._descriptor "$routingStaging/$([IO.Path]::GetFileName($bundle._descriptor))"
+  Invoke-Scp $bundle._database "$routingStaging/$([IO.Path]::GetFileName($bundle._database))"
+  $routingSwap = "if [ -e '$routingLive' ]; then mv '$routingLive' '$routingOld'; fi && " +
+                 "mv '$routingStaging' '$routingLive' && rm -rf '$routingOld'"
+  Invoke-Ssh $routingSwap
+}
+
 # Upload pack folders.
 foreach ($p in $packs) {
+  if ($SkipPacks) {
+    Write-Host "Skipping $($p.id) (-SkipPacks)" -ForegroundColor DarkGray
+    continue
+  }
   if ($OnlyPack -and $p.id -ne $OnlyPack -and $p._name -ne $OnlyPack) {
     Write-Host "Skipping $($p.id) (only publishing $OnlyPack)" -ForegroundColor DarkGray
     continue
@@ -193,6 +249,18 @@ $indexObj = [PSCustomObject]@{
     }
   }
   collections = $collections
+  routingBundles = $routingBundles | ForEach-Object {
+    [PSCustomObject]@{
+      id          = $_.id
+      name        = $_.name
+      country     = $_.country
+      bbox        = $_.bbox
+      baseUrl     = $_.baseUrl
+      file        = $_.file
+      profiles    = $_.profiles
+      description = $_.description
+    }
+  }
 }
 $indexJson = $indexObj | ConvertTo-Json -Depth 6
 $tempIndex = New-TemporaryFile

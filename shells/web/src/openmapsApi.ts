@@ -35,6 +35,7 @@ import { MbtilesTileSource } from './lib/MbtilesTileSource.js';
 import { WebGeocodeIndex } from './lib/GeocodeIndex.js';
 import { InternalRouter } from './lib/InternalRouter.js';
 import { packStorage, type StoredPack } from './packStorage.js';
+import { routingStorage } from './routingStorage.js';
 
 // ---------------------------------------------------------------------------
 // Pack types mirrored from the electron preload for UI compatibility. The
@@ -71,6 +72,10 @@ export interface PackBuildProgress {
 
 let currentPack: RegionPack | null = null;
 let currentPackId: string | null = null;
+let nationalRouter: InternalRouter | null = null;
+let nationalRoutingDb: WebDb | null = null;
+let nationalRoutingId: string | null = null;
+let nationalRoutingBbox: [number, number, number, number] | null = null;
 
 async function sha256(bytes: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -211,6 +216,19 @@ export interface RemotePackEntry {
 export interface RemotePackIndex {
   packs: RemotePackEntry[];
   collections?: RemotePackCollection[];
+  routingBundles?: RemoteRoutingBundle[];
+}
+
+/** A separately downloadable country graph, never a map pack. */
+export interface RemoteRoutingBundle {
+  id: string;
+  name: string;
+  country: string;
+  bbox: [number, number, number, number];
+  baseUrl: string;
+  file: { path: string; bytes: number; sha256: string };
+  profiles: Profile[];
+  description: string;
 }
 
 /** A country-sized download composed of independently usable regional packs. */
@@ -226,6 +244,7 @@ export interface RemotePackCollection {
 export interface RemoteCatalog {
   packs: RemotePackEntry[];
   collections: RemotePackCollection[];
+  routingBundles: RemoteRoutingBundle[];
 }
 
 export async function fetchAvailablePacks(
@@ -235,14 +254,34 @@ export async function fetchAvailablePacks(
   if (!res.ok) {
     // 404 just means no packs are hosted yet — return empty rather than
     // forcing every caller to handle the error.
-    if (res.status === 404) return { packs: [], collections: [] };
+    if (res.status === 404) return { packs: [], collections: [], routingBundles: [] };
     throw new Error(`pack index ${indexUrl} returned ${res.status}`);
   }
   const data = (await res.json()) as RemotePackIndex;
   return {
     packs: Array.isArray(data.packs) ? data.packs : [],
     collections: Array.isArray(data.collections) ? data.collections : [],
+    routingBundles: Array.isArray(data.routingBundles) ? data.routingBundles : [],
   };
+}
+
+export interface RoutingDownloadProgress { bytesReceived: number; bytesTotal: number; }
+
+async function openNationalRouting(id: string, bytes: ArrayBuffer, bbox?: [number, number, number, number]): Promise<void> {
+  if (nationalRoutingDb) try { nationalRoutingDb.close(); } catch { /* already closed */ }
+  nationalRoutingDb = await openSqliteFromBytes(new Uint8Array(bytes));
+  nationalRouter = new InternalRouter(nationalRoutingDb);
+  nationalRoutingId = id;
+  nationalRoutingBbox = bbox ?? nationalRoutingBbox;
+}
+
+async function installNationalRouting(entry: RemoteRoutingBundle, onProgress?: (p: RoutingDownloadProgress) => void): Promise<void> {
+  const bytes = await fetchWithProgress(`./packs/${entry.baseUrl}${entry.file.path}`, (bytesReceived, bytesTotal) => onProgress?.({ bytesReceived, bytesTotal }));
+  const buffer = copyToArrayBuffer(bytes);
+  if (buffer.byteLength !== entry.file.bytes) throw new Error(`national routing size mismatch: expected ${entry.file.bytes}, got ${buffer.byteLength}`);
+  if ((await sha256(buffer)) !== entry.file.sha256) throw new Error('national routing sha256 mismatch');
+  await routingStorage.put({ id: entry.id, bytes: buffer, installedAt: new Date().toISOString(), bbox: entry.bbox });
+  await openNationalRouting(entry.id, buffer, entry.bbox);
 }
 
 export interface PackDownloadProgress {
@@ -375,6 +414,13 @@ interface OpenMapsApi {
       profile: Profile,
     ): Promise<RouteResult>;
   };
+  nationalRouting: {
+    list(): Promise<Array<{ id: string; installedAt: string }>>;
+    install(entry: RemoteRoutingBundle, onProgress?: (p: RoutingDownloadProgress) => void): Promise<void>;
+    open(id: string): Promise<void>;
+    current(): Promise<string | null>;
+    uninstall(id: string): Promise<void>;
+  };
   offline: {
     set(offline: boolean): Promise<boolean>;
     get(): Promise<boolean>;
@@ -428,7 +474,31 @@ export const api: OpenMapsApi = {
   },
   route: {
     async compute(waypoints, profile) {
+      const routingBbox = nationalRoutingBbox;
+      if (profile === 'car' && nationalRouter && routingBbox && waypoints.every((p) => insideBbox(p, routingBbox))) {
+        return nationalRouter.route({ waypoints, profile });
+      }
       return requirePack().router.route({ waypoints, profile });
+    },
+  },
+  nationalRouting: {
+    async list() { return (await routingStorage.list()).map((entry) => ({ id: entry.id, installedAt: entry.installedAt })); },
+    async install(entry, onProgress) { await installNationalRouting(entry, onProgress); },
+    async open(id) {
+      const stored = await routingStorage.get(id);
+      if (!stored) throw new Error(`national routing '${id}' is not installed`);
+      await openNationalRouting(id, stored.bytes, stored.bbox);
+    },
+    async current() { return nationalRoutingId; },
+    async uninstall(id) {
+      if (nationalRoutingId === id) {
+        if (nationalRoutingDb) try { nationalRoutingDb.close(); } catch { /* already closed */ }
+        nationalRoutingDb = null;
+        nationalRouter = null;
+        nationalRoutingId = null;
+        nationalRoutingBbox = null;
+      }
+      await routingStorage.remove(id);
     },
   },
   offline: {
@@ -448,3 +518,7 @@ export const api: OpenMapsApi = {
     },
   },
 };
+
+function insideBbox(point: { lat: number; lon: number }, bbox: [number, number, number, number]): boolean {
+  return point.lon >= bbox[0] && point.lon <= bbox[2] && point.lat >= bbox[1] && point.lat <= bbox[3];
+}

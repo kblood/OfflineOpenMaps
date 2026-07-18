@@ -137,6 +137,18 @@ artifact is published.
 
 The companion is deliberately generated and ignored by Git (`routing/`);
 rebuild it from the 28 verified packs rather than committing a binary database.
+`scripts/publish-packs.ps1` detects a verified `routing/*.json` descriptor and
+uploads its SQLite companion atomically to `/openmaps/packs/routing/` before
+publishing the catalogue. The web shell exposes it as an optional, separately
+checksum-verified “Denmark-wide car routing” download; it does not duplicate
+tiles or search data from regional packs.
+
+When only the regenerated routing companion needs publishing, avoid reuploading
+the 28 unchanged map packs:
+
+```powershell
+.\scripts\publish-packs.ps1 -SkipPacks
+```
 
 ## Project-by-project mapping
 

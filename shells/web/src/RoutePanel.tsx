@@ -16,6 +16,7 @@ interface Props {
   picking: 'start' | 'end' | null;
   onRoute(route: RouteResult | null): void;
   onPickWaypoint(which: 'start' | 'end'): void;
+  onSetWaypoint(which: 'start' | 'end', point: { lat: number; lon: number }): void;
 }
 
 export function RoutePanel({
@@ -26,11 +27,14 @@ export function RoutePanel({
   picking,
   onRoute,
   onPickWaypoint,
+  onSetWaypoint,
 }: Props): JSX.Element {
   const [profile, setProfile] = useState<Profile>('car');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<RouteResult | null>(null);
+  const [startCoordinates, setStartCoordinates] = useState('');
+  const [endCoordinates, setEndCoordinates] = useState('');
 
   async function compute(): Promise<void> {
     if (!start || !end) return;
@@ -80,6 +84,13 @@ export function RoutePanel({
           onClick={() => onPickWaypoint('end')}
         />
       </div>
+      <details style={{ fontSize: 12, marginBottom: 8 }}>
+        <summary style={{ cursor: 'pointer', color: 'var(--text-muted)' }}>Enter coordinates (for cross-region routes)</summary>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, marginTop: 6 }}>
+          <CoordinateInput label="A" value={startCoordinates} onChange={setStartCoordinates} onSet={(point) => onSetWaypoint('start', point)} />
+          <CoordinateInput label="B" value={endCoordinates} onChange={setEndCoordinates} onSet={(point) => onSetWaypoint('end', point)} />
+        </div>
+      </details>
       <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
         {(['car', 'bike', 'foot'] as Profile[]).map((p) => (
           <button
@@ -149,6 +160,30 @@ export function RoutePanel({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function CoordinateInput({
+  label, value, onChange, onSet,
+}: {
+  label: string;
+  value: string;
+  onChange(value: string): void;
+  onSet(point: { lat: number; lon: number }): void;
+}): JSX.Element {
+  const apply = (): void => {
+    const parts = value.split(',').map((part) => Number(part.trim()));
+    if (parts.length !== 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return;
+    const lat = parts[0]!;
+    const lon = parts[1]!;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return;
+    onSet({ lat, lon });
+  };
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+      <span>{label} latitude, longitude</span>
+      <input value={value} onChange={(event) => onChange(event.target.value)} onBlur={apply} placeholder="55.6761, 12.5683" />
+    </label>
   );
 }
 

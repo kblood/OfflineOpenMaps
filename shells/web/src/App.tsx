@@ -12,7 +12,9 @@ import {
   getPackStorageEstimate,
   type RemotePackEntry,
   type RemotePackCollection,
+  type RemoteRoutingBundle,
   type PackDownloadProgress,
+  type RoutingDownloadProgress,
 } from './openmapsApi.js';
 import { DEFAULT_LAYER_TOGGLES, type LayerToggles, type MapTheme } from './buildMapStyle.js';
 
@@ -33,10 +35,15 @@ export function App(): JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [remotePacks, setRemotePacks] = useState<RemotePackEntry[]>([]);
   const [remoteCollections, setRemoteCollections] = useState<RemotePackCollection[]>([]);
+  const [remoteRoutingBundles, setRemoteRoutingBundles] = useState<RemoteRoutingBundle[]>([]);
+  const [installedRoutingBundles, setInstalledRoutingBundles] = useState<string[]>([]);
+  const [activeRoutingBundle, setActiveRoutingBundle] = useState<string | null>(null);
   const [installedPacks, setInstalledPacks] = useState<RegionManifest[]>([]);
   const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [progress, setProgress] = useState<PackDownloadProgress | null>(null);
+  const [routingProgress, setRoutingProgress] = useState<RoutingDownloadProgress | null>(null);
+  const [routingDownloading, setRoutingDownloading] = useState<string | null>(null);
   const [loadingLocal, setLoadingLocal] = useState(false);
   const [theme, setTheme] = useState<MapTheme>('default');
   const [toggles, setToggles] = useState<LayerToggles>(DEFAULT_LAYER_TOGGLES);
@@ -51,9 +58,13 @@ export function App(): JSX.Element {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const refreshInstalledPacks = useCallback(async () => {
-    const [packs, estimate] = await Promise.all([api.packs.list(), getPackStorageEstimate()]);
+    const [packs, estimate, routing, activeRouting] = await Promise.all([
+      api.packs.list(), getPackStorageEstimate(), api.nationalRouting.list(), api.nationalRouting.current(),
+    ]);
     setInstalledPacks(packs);
     setStorage(estimate);
+    setInstalledRoutingBundles(routing.map((bundle) => bundle.id));
+    setActiveRoutingBundle(activeRouting);
   }, []);
 
   // Fetch the catalog once on mount. Empty list (or 404) is treated as
@@ -63,6 +74,7 @@ export function App(): JSX.Element {
       .then((catalog) => {
         setRemotePacks(catalog.packs);
         setRemoteCollections(catalog.collections);
+        setRemoteRoutingBundles(catalog.routingBundles);
       })
       .catch((e) => {
         // eslint-disable-next-line no-console
@@ -70,6 +82,35 @@ export function App(): JSX.Element {
       });
     void refreshInstalledPacks();
   }, [refreshInstalledPacks]);
+
+  const downloadNationalRouting = useCallback(async (entry: RemoteRoutingBundle) => {
+    setLoadError(null);
+    setRoutingDownloading(entry.id);
+    setRoutingProgress(null);
+    try {
+      await api.nationalRouting.install(entry, (p) => setRoutingProgress(p));
+      setActiveRoutingBundle(entry.id);
+      await refreshInstalledPacks();
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRoutingDownloading(null);
+      setRoutingProgress(null);
+    }
+  }, [refreshInstalledPacks]);
+
+  const openNationalRouting = useCallback(async (entry: RemoteRoutingBundle) => {
+    setLoadError(null);
+    setRoutingDownloading(entry.id);
+    try {
+      await api.nationalRouting.open(entry.id);
+      setActiveRoutingBundle(entry.id);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRoutingDownloading(null);
+    }
+  }, []);
 
   useEffect(() => {
     const updateOnline = () => setOnline(navigator.onLine);
@@ -289,8 +330,38 @@ export function App(): JSX.Element {
                         {collection.description}
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>
-                        Choose a region to download. Search and routing work inside the open region; neighbouring regions overlap at their edges.
+                        Choose a region to download. Search and detailed bike/foot routing work inside the open region; neighbouring regions overlap at their edges.
                       </div>
+                      {remoteRoutingBundles.filter((bundle) => bundle.country === collection.country).map((bundle) => {
+                        const installed = installedRoutingBundles.includes(bundle.id);
+                        const active = activeRoutingBundle === bundle.id;
+                        const downloadingThis = routingDownloading === bundle.id;
+                        const percent = downloadingThis && routingProgress?.bytesTotal
+                          ? Math.min(100, Math.round((routingProgress.bytesReceived / routingProgress.bytesTotal) * 100))
+                          : null;
+                        return (
+                          <div key={bundle.id} style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid var(--border)' }}>
+                            <div style={{ fontSize: 12 }}><strong>{bundle.name}</strong> · {formatBytes(bundle.file.bytes)}</div>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{bundle.description}</div>
+                            <button
+                              className={installed ? '' : 'primary'}
+                              onClick={() => void (installed ? openNationalRouting(bundle) : downloadNationalRouting(bundle))}
+                              disabled={routingDownloading !== null || active}
+                              style={{ marginTop: 5, width: '100%' }}
+                            >
+                              {active ? 'Denmark-wide car routing enabled' : installed ? 'Use installed Denmark-wide car routing' : downloadingThis ? 'Downloading national routing…' : 'Enable Denmark-wide car routing'}
+                            </button>
+                            {downloadingThis ? (
+                              <div style={{ marginTop: 5 }}>
+                                <div className="progress"><div className="progress-bar" style={{ width: percent != null ? `${percent}%` : '40%' }} /></div>
+                                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                                  {formatBytes(routingProgress?.bytesReceived ?? 0)}{routingProgress?.bytesTotal ? ` / ${formatBytes(routingProgress.bytesTotal)}` : ''}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
                         {members.map((pack) => (
                           <button
@@ -456,6 +527,11 @@ export function App(): JSX.Element {
                   return next;
                 })
               }
+              onSetWaypoint={(which, point) => {
+                if (which === 'start') setStart(point);
+                else setEnd(point);
+                setPicking(null);
+              }}
             />
             <MapStylePanel
               theme={theme}
