@@ -9,3 +9,11 @@ createRoot(root).render(
     <App />
   </StrictMode>,
 );
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register('./sw.js').catch((error: unknown) => {
+      console.warn('[openmaps] service worker registration failed:', error);
+    });
+  });
+}

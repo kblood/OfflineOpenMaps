@@ -39,6 +39,8 @@ export interface DawaFetchOpts {
   onProgress?: (msg: string) => void;
   /** Custom fetch (for tests). Defaults to global `fetch`. */
   fetchImpl?: typeof fetch;
+  /** Fetch cadastral polygon outlines as well as addresses. Defaults to true. */
+  includeParcels?: boolean;
 }
 
 const DEFAULT_BASE_URL = 'https://api.dataforsyningen.dk';
@@ -88,6 +90,7 @@ export async function fetchDawa(opts: DawaFetchOpts): Promise<DawaFetchResult> {
 
   // Index addresses to PlaceFeature shape, capturing parcel id when present.
   const addresses: DawaAddress[] = [];
+  const addressIds = new Set<string>();
   const parcelIds = new Set<string>();
   for (const feat of addrJson.features) {
     const p = feat.properties;
@@ -104,8 +107,20 @@ export async function fetchDawa(opts: DawaFetchOpts): Promise<DawaFetchResult> {
     if (!vejnavn || !housenr) continue;
     const displayName = `${vejnavn} ${housenr}`;
     const adminPath = postnr && postnrnavn ? `${postnr} ${postnrnavn}` : null;
-    // DAWA's authoritative id is a UUID; we keep it under our id namespace.
-    const id = `dawa:${p.id ?? `${vejnavn}-${housenr}-${postnr}`}`;
+    // DAWA's authoritative UUID is the GeoJSON feature id. The readable
+    // fallback is only for fixtures that omit it; real data can have several
+    // access-address records with the same street, house number and postcode.
+    const baseId = `dawa:${feat.id ?? p.id ?? `${vejnavn}-${housenr}-${postnr}`}`;
+    // A few DAWA records legitimately share the same display address and
+    // API-level identifier. SQLite requires a primary key per record, so
+    // add a deterministic coordinate suffix only for such collisions.
+    let id = baseId;
+    if (addressIds.has(id)) {
+      id = `${baseId}@${lat.toFixed(7)},${lon.toFixed(7)}`;
+      let suffix = 2;
+      while (addressIds.has(id)) id = `${baseId}@${lat.toFixed(7)},${lon.toFixed(7)}#${suffix++}`;
+    }
+    addressIds.add(id);
     // Parcel reference (some addresses have no jordstykke — e.g. on bridges).
     let parcelId: string | null = null;
     if (p.jordstykke_ejerlavkode != null && p.jordstykke_matrikelnr) {
@@ -124,9 +139,14 @@ export async function fetchDawa(opts: DawaFetchOpts): Promise<DawaFetchResult> {
     });
   }
 
-  log(`Fetching ${parcelIds.size} parcel polygons from DAWA…`);
-  const parcels = await fetchParcels(parcelIds, baseUrl, f, log);
-  log(`  - ${parcels.length} parcel polygons received`);
+  const parcels = opts.includeParcels === false
+    ? []
+    : await fetchParcels(parcelIds, baseUrl, f, log);
+  if (opts.includeParcels === false) {
+    log(`Skipping ${parcelIds.size} parcel polygons (address-only build)`);
+  } else {
+    log(`  - ${parcels.length} parcel polygons received`);
+  }
 
   return { addresses, parcels };
 }
@@ -228,6 +248,7 @@ interface DawaGeojsonResponse {
   features?: ReadonlyArray<DawaGeojsonFeature>;
 }
 interface DawaGeojsonFeature {
+  id?: string;
   geometry?: { type: string; coordinates?: ReadonlyArray<number> };
   properties?: {
     id?: string;

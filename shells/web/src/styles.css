@@ -81,6 +81,22 @@ body {
   letter-spacing: 0.5px;
 }
 
+.connection-status {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.connection-status.online {
+  color: #26734d;
+}
+
+.connection-status.offline {
+  color: #b54708;
+}
+
 .panel {
   background: var(--bg-list);
   border: 1px solid var(--border);

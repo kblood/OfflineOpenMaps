@@ -34,6 +34,7 @@ import { openSqliteFromBytes, type WebDb } from './lib/sqlite.js';
 import { MbtilesTileSource } from './lib/MbtilesTileSource.js';
 import { WebGeocodeIndex } from './lib/GeocodeIndex.js';
 import { InternalRouter } from './lib/InternalRouter.js';
+import { packStorage, type StoredPack } from './packStorage.js';
 
 // ---------------------------------------------------------------------------
 // Pack types mirrored from the electron preload for UI compatibility. The
@@ -70,6 +71,61 @@ export interface PackBuildProgress {
 
 let currentPack: RegionPack | null = null;
 let currentPackId: string | null = null;
+
+async function sha256(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+async function verifyStoredPack(pack: StoredPack): Promise<{ ok: true } | { ok: false; problem: string }> {
+  if (pack.manifest.files.routing.path !== pack.manifest.files.geocode.path) {
+    return {
+      ok: false,
+      problem: 'web packs with a separate routing file are not supported yet',
+    };
+  }
+  const files = [
+    ['tiles', pack.manifest.files.tiles, pack.tiles],
+    ['geocode', pack.manifest.files.geocode, pack.geocode],
+  ] as const;
+  for (const [name, file, bytes] of files) {
+    if (bytes.byteLength !== file.bytes) {
+      return { ok: false, problem: `${name} size mismatch: expected ${file.bytes}, got ${bytes.byteLength}` };
+    }
+    if ((await sha256(bytes)) !== file.sha256) return { ok: false, problem: `${name} sha256 mismatch` };
+  }
+  return { ok: true };
+}
+
+async function openStoredPack(stored: StoredPack): Promise<RegionManifest> {
+  const verification = await verifyStoredPack(stored);
+  if (!verification.ok) throw new Error(`pack '${stored.manifest.id}' failed verification: ${verification.problem}`);
+  if (currentPack) await currentPack.close();
+
+  const tilesDb = await openSqliteFromBytes(new Uint8Array(stored.tiles));
+  const geocodeDb = await openSqliteFromBytes(new Uint8Array(stored.geocode));
+  const tiles = new MbtilesTileSource(tilesDb);
+  const geocode = new WebGeocodeIndex(geocodeDb);
+  const router = new InternalRouter(geocodeDb);
+  currentPack = {
+    manifest: stored.manifest,
+    tiles,
+    geocode,
+    router,
+    async close() {
+      await tiles.close();
+      try { geocodeDb.close(); } catch { /* already closed */ }
+    },
+  };
+  currentPackId = stored.manifest.id;
+  return stored.manifest;
+}
 
 function requirePack(): RegionPack {
   if (!currentPack) throw new Error('no pack open');
@@ -108,43 +164,16 @@ export async function loadPackFromDirectory(files: FileList): Promise<RegionMani
 
   const manifest = validateManifest(JSON.parse(await manifestFile.text()) as unknown);
 
-  // Close any previously-open pack before loading the new one.
-  if (currentPack) {
-    await currentPack.close();
-    currentPack = null;
-    currentPackId = null;
-  }
-
-  const tilesBytes = new Uint8Array(await tilesFile.arrayBuffer());
-  const geocodeBytes = new Uint8Array(await geocodeFile.arrayBuffer());
-
-  const tilesDb = await openSqliteFromBytes(tilesBytes);
-  const geocodeDb = await openSqliteFromBytes(geocodeBytes);
-
-  const tiles = new MbtilesTileSource(tilesDb);
-  const geocode = new WebGeocodeIndex(geocodeDb);
-  const router = new InternalRouter(geocodeDb);
-
-  const pack: RegionPack = {
+  const stored: StoredPack = {
     manifest,
-    tiles,
-    geocode,
-    router,
-    async close() {
-      await tiles.close();
-      // tiles.close() also closes the tiles db; geocode db is shared with
-      // the router so we close it directly here.
-      try {
-        geocodeDb.close();
-      } catch {
-        // already closed
-      }
-    },
+    tiles: await tilesFile.arrayBuffer(),
+    geocode: await geocodeFile.arrayBuffer(),
+    installedAt: new Date().toISOString(),
   };
-
-  currentPack = pack;
-  currentPackId = manifest.id;
-  return manifest;
+  const verification = await verifyStoredPack(stored);
+  if (!verification.ok) throw new Error(`pack failed verification: ${verification.problem}`);
+  await packStorage.put(stored);
+  return openStoredPack(stored);
 }
 
 export async function closeCurrentPack(): Promise<void> {
@@ -153,6 +182,10 @@ export async function closeCurrentPack(): Promise<void> {
     currentPack = null;
     currentPackId = null;
   }
+}
+
+export async function getPackStorageEstimate(): Promise<{ usage: number; quota: number } | null> {
+  return packStorage.estimate();
 }
 
 // ---------------------------------------------------------------------------
@@ -177,20 +210,39 @@ export interface RemotePackEntry {
 
 export interface RemotePackIndex {
   packs: RemotePackEntry[];
+  collections?: RemotePackCollection[];
+}
+
+/** A country-sized download composed of independently usable regional packs. */
+export interface RemotePackCollection {
+  id: string;
+  name: string;
+  country: string;
+  bbox: [number, number, number, number];
+  description: string;
+  members: string[];
+}
+
+export interface RemoteCatalog {
+  packs: RemotePackEntry[];
+  collections: RemotePackCollection[];
 }
 
 export async function fetchAvailablePacks(
   indexUrl = './packs/packs.json',
-): Promise<RemotePackEntry[]> {
+): Promise<RemoteCatalog> {
   const res = await fetch(indexUrl, { cache: 'no-cache' });
   if (!res.ok) {
     // 404 just means no packs are hosted yet — return empty rather than
     // forcing every caller to handle the error.
-    if (res.status === 404) return [];
+    if (res.status === 404) return { packs: [], collections: [] };
     throw new Error(`pack index ${indexUrl} returned ${res.status}`);
   }
   const data = (await res.json()) as RemotePackIndex;
-  return Array.isArray(data.packs) ? data.packs : [];
+  return {
+    packs: Array.isArray(data.packs) ? data.packs : [],
+    collections: Array.isArray(data.collections) ? data.collections : [],
+  };
 }
 
 export interface PackDownloadProgress {
@@ -235,44 +287,23 @@ export async function loadPackFromUrl(
   // hand back a stale body via a misconfigured proxy or service worker.
   const v = encodeURIComponent(manifest.builtAt);
 
-  const tilesBytes = await fetchWithProgress(`${base}tiles.mbtiles?v=${v}`, (received, total) => {
+  const tilesBytes = await fetchWithProgress(`${base}${manifest.files.tiles.path}?v=${v}`, (received, total) => {
     onProgress?.({ step: 'tiles', bytesReceived: received, bytesTotal: total });
   });
-  const geocodeBytes = await fetchWithProgress(`${base}geocode.sqlite?v=${v}`, (received, total) => {
+  const geocodeBytes = await fetchWithProgress(`${base}${manifest.files.geocode.path}?v=${v}`, (received, total) => {
     onProgress?.({ step: 'geocode', bytesReceived: received, bytesTotal: total });
   });
 
-  if (currentPack) {
-    await currentPack.close();
-    currentPack = null;
-    currentPackId = null;
-  }
-
-  const tilesDb = await openSqliteFromBytes(tilesBytes);
-  const geocodeDb = await openSqliteFromBytes(geocodeBytes);
-
-  const tiles = new MbtilesTileSource(tilesDb);
-  const geocode = new WebGeocodeIndex(geocodeDb);
-  const router = new InternalRouter(geocodeDb);
-
-  const pack: RegionPack = {
+  const stored: StoredPack = {
     manifest,
-    tiles,
-    geocode,
-    router,
-    async close() {
-      await tiles.close();
-      try {
-        geocodeDb.close();
-      } catch {
-        // already closed
-      }
-    },
+    tiles: copyToArrayBuffer(tilesBytes),
+    geocode: copyToArrayBuffer(geocodeBytes),
+    installedAt: new Date().toISOString(),
   };
-
-  currentPack = pack;
-  currentPackId = manifest.id;
-  return manifest;
+  const verification = await verifyStoredPack(stored);
+  if (!verification.ok) throw new Error(`downloaded pack failed verification: ${verification.problem}`);
+  await packStorage.put(stored);
+  return openStoredPack(stored);
 }
 
 /**
@@ -356,13 +387,12 @@ interface OpenMapsApi {
 export const api: OpenMapsApi = {
   packs: {
     async list() {
-      return currentPack ? [currentPack.manifest] : [];
+      return (await packStorage.list()).map((pack) => pack.manifest);
     },
     async open(packId: string) {
-      if (!currentPack || currentPackId !== packId) {
-        throw new Error(`pack ${packId} is not loaded — pick its folder via the loader`);
-      }
-      return currentPack.manifest;
+      const stored = await packStorage.get(packId);
+      if (!stored) throw new Error(`pack '${packId}' is not installed`);
+      return openStoredPack(stored);
     },
     async close() {
       await closeCurrentPack();
@@ -370,14 +400,14 @@ export const api: OpenMapsApi = {
     async current() {
       return currentPack ? currentPack.manifest : null;
     },
-    async verify() {
-      // MVP: we don't keep the raw bytes around to re-hash. Trust the
-      // pack the user just loaded; verification is a future step that
-      // would happen at load time.
-      return { ok: true };
+    async verify(packId) {
+      const stored = await packStorage.get(packId);
+      if (!stored) return { ok: false, problem: `pack '${packId}' is not installed` };
+      return verifyStoredPack(stored);
     },
-    async uninstall() {
-      await closeCurrentPack();
+    async uninstall(packId) {
+      if (currentPackId === packId) await closeCurrentPack();
+      await packStorage.remove(packId);
     },
   },
   tiles: {

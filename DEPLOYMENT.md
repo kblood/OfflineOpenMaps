@@ -113,6 +113,31 @@ separate script: `npm run dist:portable -w @openmaps/electron-shell`.
 3. When ready to publish: `release.bat`.
 4. Open `https://dionysus.dk/openmaps/` from any browser.
 
+## Denmark national routing companion
+
+Regional packs overlap for map display, but a cross-region route is calculated
+from a separate, merged road graph — it is not assembled by joining independent
+route results at an arbitrary pack boundary. The builder preserves OSM node IDs
+from the verified regional `geocode.sqlite` files, so roads shared by adjacent
+packs become the same vertices in the national graph.
+
+```powershell
+node scripts/build-denmark-routing.mjs
+npm run build -w @openmaps/platform-node
+node scripts/verify-denmark-routing.mjs
+```
+
+The default is a 40 km/h-and-above car backbone, which keeps the companion
+substantially smaller than the exhaustive graph while retaining a verified
+Copenhagen-to-Aarhus route. Use `--min-speed 0` only for an exhaustive local
+experiment; it is too large for a practical browser download. Bike and foot
+routing remain detailed, regional-pack features. The verifier is a release
+gate: it must prove a route across the Zealand/Jutland boundary before the
+artifact is published.
+
+The companion is deliberately generated and ignored by Git (`routing/`);
+rebuild it from the 28 verified packs rather than committing a binary database.
+
 ## Project-by-project mapping
 
 | Shell | Build cmd | Deploy URL |
@@ -122,12 +147,11 @@ separate script: `npm run dist:portable -w @openmaps/electron-shell`.
 
 ## Known constraints
 
-- **The user must bring their own pack.** The cloud build has no
-  bundled pack — it ships only the shell. Users pick a region pack
-  folder from local disk on first load. A future "fetch pack from URL"
-  flow would let us host packs at e.g.
-  `https://dionysus.dk/openmaps/packs/aalborg/` and have the shell
-  download into OPFS on first run.
+- **Pack installation prefers OPFS.** The web shell downloads packs hosted
+  under `/openmaps/packs/`, checksum-verifies them, and stores their files in
+  OPFS where the browser supports it (IndexedDB is the fallback). It still
+  deserializes SQLite into memory while a pack is open; direct SQLite OPFS-VFS
+  access needs a worker-based runtime and is the next performance upgrade.
 - **CORS for cross-origin pack hosting.** If you ever host packs on a
   different origin than the shell, the pack server must send
   `Access-Control-Allow-Origin`. Same-origin hosting (under

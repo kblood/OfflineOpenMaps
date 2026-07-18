@@ -1,7 +1,12 @@
 @echo off
 setlocal
 title OpenMaps v2 release - web shell
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\release.ps1" %*
+where pwsh >nul 2>&1
+if not errorlevel 1 (
+  pwsh -NoProfile -File "%~dp0scripts\release.ps1" %*
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\release.ps1" %*
+)
 set "RC=%ERRORLEVEL%"
 if not "%RC%"=="0" (
   echo.

@@ -22,6 +22,8 @@ interface CliArgs {
   pbfPath?: string;
   osmPath?: string;
   clipBbox?: [number, number, number, number];
+  skipDawaParcels?: boolean;
+  skipDawa?: boolean;
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
@@ -61,6 +63,10 @@ function parseArgs(argv: readonly string[]): CliArgs {
           process.exit(2);
         }
       }
+    } else if (a === '--skip-dawa-parcels') {
+      args.skipDawaParcels = true;
+    } else if (a === '--skip-dawa') {
+      args.skipDawa = true;
     } else if (a === '--help' || a === '-h') args.command = 'help';
   }
   return args;
@@ -87,6 +93,8 @@ Usage:
   region-builder build-pbf --pbf <file.osm.pbf> --id <id> --out <dir>
                            [--name <human-name>] [--country <XX>]
                            [--bbox <minLon,minLat,maxLon,maxLat>]
+                           [--skip-dawa-parcels]
+                           [--skip-dawa]
       Build a pack from a Geofabrik .osm.pbf extract. For country-sized
       files you almost always want --bbox to clip down to a region of
       interest before the pack is written; otherwise expect multi-GB
@@ -178,11 +186,12 @@ Examples:
   // address registry — full coverage, daily-updated, parcel polygons included).
   // Other countries keep OSM addresses; we can broaden this when another
   // country's authoritative registry is wired up.
-  if (country === 'DK') {
+  if (country === 'DK' && !args.skipDawa) {
     process.stdout.write('  - augmenting with DAWA (authoritative DK addresses)\n');
     try {
       const dawa = await fetchDawa({
         bbox: data.bbox,
+        includeParcels: !args.skipDawaParcels,
         onProgress: (msg) => process.stdout.write(`    ${msg}\n`),
       });
       data = applyDawa(data, dawa);
@@ -194,6 +203,8 @@ Examples:
         `  - DAWA fetch failed (continuing with OSM addresses): ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
+  } else if (country === 'DK') {
+    process.stdout.write('  - skipping DAWA enrichment (OSM-only regional build)\n');
   }
 
   // Snap address pins to the centroid of their containing building footprint

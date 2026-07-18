@@ -9,7 +9,9 @@ import {
   loadPackFromDirectory,
   loadPackFromUrl,
   fetchAvailablePacks,
+  getPackStorageEstimate,
   type RemotePackEntry,
+  type RemotePackCollection,
   type PackDownloadProgress,
 } from './openmapsApi.js';
 import { DEFAULT_LAYER_TOGGLES, type LayerToggles, type MapTheme } from './buildMapStyle.js';
@@ -30,6 +32,9 @@ export function App(): JSX.Element {
   const [manifest, setManifest] = useState<RegionManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [remotePacks, setRemotePacks] = useState<RemotePackEntry[]>([]);
+  const [remoteCollections, setRemoteCollections] = useState<RemotePackCollection[]>([]);
+  const [installedPacks, setInstalledPacks] = useState<RegionManifest[]>([]);
+  const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [progress, setProgress] = useState<PackDownloadProgress | null>(null);
   const [loadingLocal, setLoadingLocal] = useState(false);
@@ -41,18 +46,39 @@ export function App(): JSX.Element {
   const [endAddress, setEndAddress] = useState<string | null>(null);
   const [picking, setPicking] = useState<'start' | 'end' | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
   const mapRef = useRef<MapViewHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshInstalledPacks = useCallback(async () => {
+    const [packs, estimate] = await Promise.all([api.packs.list(), getPackStorageEstimate()]);
+    setInstalledPacks(packs);
+    setStorage(estimate);
+  }, []);
 
   // Fetch the catalog once on mount. Empty list (or 404) is treated as
   // "no remote packs hosted yet" — the local folder loader still works.
   useEffect(() => {
     void fetchAvailablePacks()
-      .then((list) => setRemotePacks(list))
+      .then((catalog) => {
+        setRemotePacks(catalog.packs);
+        setRemoteCollections(catalog.collections);
+      })
       .catch((e) => {
         // eslint-disable-next-line no-console
         console.warn('[openmaps] pack catalog fetch failed:', e);
       });
+    void refreshInstalledPacks();
+  }, [refreshInstalledPacks]);
+
+  useEffect(() => {
+    const updateOnline = () => setOnline(navigator.onLine);
+    window.addEventListener('online', updateOnline);
+    window.addEventListener('offline', updateOnline);
+    return () => {
+      window.removeEventListener('online', updateOnline);
+      window.removeEventListener('offline', updateOnline);
+    };
   }, []);
 
   const downloadPack = useCallback(async (entry: RemotePackEntry) => {
@@ -68,13 +94,14 @@ export function App(): JSX.Element {
       setStartAddress(null);
       setEndAddress(null);
       setPicking(null);
+      await refreshInstalledPacks();
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setDownloading(null);
       setProgress(null);
     }
-  }, []);
+  }, [refreshInstalledPacks]);
 
   const onFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -88,12 +115,13 @@ export function App(): JSX.Element {
       setStartAddress(null);
       setEndAddress(null);
       setPicking(null);
+      await refreshInstalledPacks();
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingLocal(false);
     }
-  }, []);
+  }, [refreshInstalledPacks]);
 
   // Resolve start/end to display addresses whenever the coordinates change.
   // Effect-ignored stale results: if the user double-picks rapidly we may
@@ -206,6 +234,9 @@ export function App(): JSX.Element {
         <div className="sidebar-header">
           <strong>OpenMaps v2</strong>
           <span className="badge">web</span>
+          <span className={`connection-status ${online ? 'online' : 'offline'}`}>
+            {online ? 'online' : 'offline'}
+          </span>
         </div>
 
         <div className="panel">
@@ -241,13 +272,52 @@ export function App(): JSX.Element {
             </p>
           )}
 
+          {remoteCollections.length > 0 ? (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                Country coverage
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {remoteCollections.map((collection) => {
+                  const members = collection.members
+                    .map((id) => remotePacks.find((pack) => pack.id === id))
+                    .filter((pack): pack is RemotePackEntry => Boolean(pack));
+                  return (
+                    <div key={collection.id} style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 7 }}>
+                      <strong style={{ fontSize: 13 }}>{collection.name}</strong>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+                        {collection.description}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>
+                        Choose a region to download. Search and routing work inside the open region; neighbouring regions overlap at their edges.
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
+                        {members.map((pack) => (
+                          <button
+                            key={pack.id}
+                            onClick={() => void downloadPack(pack)}
+                            disabled={downloading !== null}
+                            style={{ textAlign: 'left' }}
+                            title={`${pack.country} · bbox ${pack.bbox.map((n) => n.toFixed(3)).join(', ')}`}
+                          >
+                            {pack.name} <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>({formatBytes(pack.totalBytes)})</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
           {remotePacks.length > 0 ? (
             <div style={{ marginTop: 8 }}>
               <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
                 {manifest ? 'Switch to another pack' : 'Download a pack'}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {remotePacks.map((p) => {
+                {remotePacks.filter((p) => !remoteCollections.some((c) => c.members.includes(p.id))).map((p) => {
                   const isThis = downloading === p.id;
                   const pct =
                     isThis && progress && progress.bytesTotal > 0
@@ -294,6 +364,45 @@ export function App(): JSX.Element {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+          ) : null}
+
+          {installedPacks.length > 0 ? (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                Installed packs{storage ? ` · ${formatBytes(storage.usage)} used` : ''}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {installedPacks.map((pack) => (
+                  <div key={pack.id} style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      style={{ textAlign: 'left', flex: 1 }}
+                      onClick={() => {
+                        void api.packs.open(pack.id).then((opened) => {
+                          setManifest(opened);
+                          setLoadError(null);
+                          setSidebarOpen(false);
+                        }).catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)));
+                      }}
+                    >
+                      {pack.name} <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>({pack.country})</span>
+                    </button>
+                    <button
+                      aria-label={`Remove ${pack.name}`}
+                      title={`Remove ${pack.name}`}
+                      onClick={() => {
+                        if (!window.confirm(`Remove downloaded pack '${pack.name}'?`)) return;
+                        void api.packs.uninstall(pack.id).then(() => {
+                          if (manifest?.id === pack.id) setManifest(null);
+                          return refreshInstalledPacks();
+                        }).catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)));
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           ) : null}
@@ -358,8 +467,8 @@ export function App(): JSX.Element {
         ) : null}
 
         <div className="footer">
-          MVP web build. Packs stay in memory until refresh — OPFS
-          persistence is a future step.
+          Downloaded packs persist in this browser and are checksum-verified
+          before opening. The app shell is available after an offline reload.
         </div>
       </aside>
       <main className={`map-pane${picking ? ' crosshair' : ''}`}>

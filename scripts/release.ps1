@@ -99,7 +99,8 @@ Get-ChildItem -Path $DistDir -Force | ForEach-Object {
 if (Test-Path $Htaccess) {
   Write-Host "    + .htaccess"
   Invoke-Scp $Htaccess "$StagingPath/.htaccess"
-} else {
+}
+if (-not (Test-Path $Htaccess)) {
   Write-Warning "deploy\.htaccess missing — skipping cache/MIME config upload"
 }
 

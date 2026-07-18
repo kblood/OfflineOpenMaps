@@ -28,7 +28,8 @@
 #>
 param(
   [string]$PacksDir = '',
-  [string]$OnlyPack = ''
+  [string]$OnlyPack = '',
+  [string]$CollectionsDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -40,6 +41,9 @@ $RemoteBase  = '/var/www/html/openmaps/packs'
 $Root        = Split-Path -Parent $PSScriptRoot
 if (-not $PacksDir) {
   $PacksDir = Join-Path $Root 'packs'
+}
+if (-not $CollectionsDir) {
+  $CollectionsDir = Join-Path $Root 'config'
 }
 $Target = "${RemoteUser}@${RemoteHost}"
 
@@ -53,7 +57,13 @@ if (-not (Test-Path $SshKey)) {
 $SshOpts = @(
   '-i', $SshKey,
   '-o', 'BatchMode=yes',
-  '-o', 'StrictHostKeyChecking=accept-new'
+  '-o', 'StrictHostKeyChecking=accept-new',
+  # A stalled SSH command used to leave the resumable country builder waiting
+  # forever at an otherwise atomic rename. Bound both connection setup and an
+  # unresponsive established session so a rerun can safely resume.
+  '-o', 'ConnectTimeout=20',
+  '-o', 'ServerAliveInterval=15',
+  '-o', 'ServerAliveCountMax=4'
 )
 
 function Invoke-Ssh([string]$RemoteCommand) {
@@ -110,6 +120,31 @@ if ($packs.Count -eq 0) {
   throw "No valid packs found in $PacksDir"
 }
 
+# A collection is published only when every referenced region is a valid
+# local pack. This prevents a country entry from advertising incomplete
+# coverage while a multi-region build is still in progress.
+$collections = @()
+if (Test-Path $CollectionsDir) {
+  Get-ChildItem -Path $CollectionsDir -Filter '*-collection.json' -File | ForEach-Object {
+    $raw = Get-Content $_.FullName -Raw
+    $collection = $raw | ConvertFrom-Json
+    $members = @($collection.members | ForEach-Object { [string]$_ })
+    $missing = @($members | Where-Object { $_ -notin @($packs | ForEach-Object { $_.id }) })
+    if ($missing.Count -gt 0) {
+      Write-Warning "Skipping collection $($collection.id): missing valid packs $($missing -join ', ')"
+      return
+    }
+    $collections += [PSCustomObject]@{
+      id          = [string]$collection.id
+      name        = [string]$collection.name
+      country     = [string]$collection.country
+      bbox        = $collection.bbox
+      description = [string]$collection.description
+      members     = $members
+    }
+  }
+}
+
 # Ensure the remote root exists.
 Invoke-Ssh "mkdir -p '$RemoteBase'"
 
@@ -157,6 +192,7 @@ $indexObj = [PSCustomObject]@{
       baseUrl    = $_.baseUrl
     }
   }
+  collections = $collections
 }
 $indexJson = $indexObj | ConvertTo-Json -Depth 6
 $tempIndex = New-TemporaryFile
@@ -167,7 +203,9 @@ Write-Host "=== Uploading packs.json ===" -ForegroundColor Cyan
 $indexTmp = "$RemoteBase/packs.json.tmp"
 $indexFinal = "$RemoteBase/packs.json"
 Invoke-Scp $tempIndex.FullName $indexTmp
-Invoke-Ssh "mv '$indexTmp' '$indexFinal'"
+# The catalogue is a single small file; a healthy rename is instantaneous.
+# Bound it so a remote filesystem stall cannot strand the resumable builder.
+Invoke-Ssh "timeout 30s mv '$indexTmp' '$indexFinal'"
 Remove-Item $tempIndex -Force
 
 Write-Host ""
@@ -175,4 +213,7 @@ Write-Host "Done." -ForegroundColor Green
 Write-Host "  Catalog: https://dionysus.dk/openmaps/packs/packs.json" -ForegroundColor Green
 foreach ($p in $indexObj.packs) {
   Write-Host "  - $($p.name) ($($p.id)) — $([Math]::Round($p.totalBytes / 1MB, 1)) MB" -ForegroundColor Green
+}
+foreach ($collection in $indexObj.collections) {
+  Write-Host "  - $($collection.name) collection ($($collection.members.Count) regions)" -ForegroundColor Green
 }

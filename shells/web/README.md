@@ -19,6 +19,12 @@ npm run build -w @openmaps/web-shell
 # Static site lands in shells/web/dist/
 ```
 
+The deployed shell registers a service worker that caches the application
+assets and fonts. Once it has been opened online once, the app can reload with
+the network disconnected and reopen a previously installed pack. Pack database
+files are deliberately not duplicated in Cache Storage; they remain in the
+verified pack store.
+
 ## Loading a pack
 
 The MVP loads a region pack from a **user-picked folder**:
@@ -31,15 +37,18 @@ The MVP loads a region pack from a **user-picked folder**:
 3. The map renders once the three files have been deserialized into in-memory
    SQLite databases.
 
-The pack stays in memory until the page is reloaded — there is no persistence
-in MVP. OPFS-backed persistence is on the roadmap.
+After a successful checksum verification, the pack is installed in the
+browser's persistent storage and can be reopened after a page reload. Modern
+browsers store pack files in OPFS; browsers without OPFS use IndexedDB. The
+SQLite runtime still deserializes an open pack into memory. Moving SQLite itself
+to its worker-based OPFS VFS is a later performance optimization.
 
 ## Differences vs the Electron shell
 
 | Feature                       | Electron        | Web (MVP)                       |
 | ----------------------------- | --------------- | ------------------------------- |
 | Offline-first                 | ✅ `session.setOffline` enforces it | ⚠️ Browser doesn't expose a `setOffline` toggle; a service worker that drops `fetch` events is a future task |
-| Pack storage                  | Filesystem      | In-memory (file picker)         |
+| Pack storage                  | Filesystem      | OPFS where available, IndexedDB fallback; in-memory while open |
 | In-app pack builder (Overpass / Geofabrik) | ✅            | ❌ CORS blocks both endpoints from the browser; build packs with the CLI and load them here |
 | Pack picker (multi-pack)      | ✅              | ❌ MVP loads one pack at a time |
 | Self-test panel               | ✅              | ❌ Without a hard offline lock the panel would over-promise |
@@ -69,13 +78,22 @@ public/
 
 The platform-node implementations use `node:sqlite`; the browser ports use
 `@sqlite.org/sqlite-wasm` via `sqlite3_deserialize` against in-memory bytes.
-The Dijkstra algorithm in `InternalRouter.ts` is unchanged from the Node
-version — only the SQLite handle differs.
+`InternalRouter.ts` uses A* over the extracted OSM graph in both environments;
+only the SQLite handle differs. This keeps regional routing responsive without
+changing routing semantics.
+
+For Denmark-wide driving, `scripts/build-denmark-routing.mjs` generates a
+separate, merged car-routing companion from the 28 regional graphs. It uses
+their shared OSM node IDs to cross pack boundaries as one graph, rather than
+stitching separate route results. The companion is verified with Copenhagen →
+Aarhus before publishing. It is intentionally separate from map packs because
+the national graph is much larger than a regional map download; the current
+web picker continues to provide detailed routing inside the open map pack.
 
 ## Roadmap
 
-- **OPFS persistence** — store deserialized SQLite files in OPFS so the pack
-  survives reloads. The build is already COOP/COEP-isolated.
+- **OPFS-backed SQLite** — open installed databases through SQLite's
+  worker-based OPFS VFS rather than deserializing them into memory on every launch.
 - **Service worker offline lock** — a SW that drops every `fetch()` except
   for `omap://` and same-origin static assets, exposing an `offline.set()`
   that matches Electron's guarantee semantics.
