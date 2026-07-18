@@ -31,7 +31,8 @@ param(
   [string]$OnlyPack = '',
   [string]$CollectionsDir = '',
   [string]$RoutingDir = '',
-  [switch]$SkipPacks
+  [switch]$SkipPacks,
+  [switch]$SkipRouting
 )
 
 $ErrorActionPreference = 'Stop'
@@ -187,6 +188,10 @@ if (Test-Path $RoutingDir) {
 Invoke-Ssh "mkdir -p '$RemoteBase'"
 
 foreach ($bundle in $routingBundles) {
+  if ($SkipRouting) {
+    Write-Host "Skipping routing companion $($bundle.id) (-SkipRouting)" -ForegroundColor DarkGray
+    continue
+  }
   Write-Host ""
   Write-Host "=== Uploading routing companion $($bundle.id) ($([Math]::Round($bundle.file.bytes / 1MB, 1)) MB) ===" -ForegroundColor Cyan
   $routingStaging = "$RemoteBase/.staging-routing-$($bundle.id)-$([guid]::NewGuid().ToString().Substring(0, 8))"
@@ -249,7 +254,7 @@ $indexObj = [PSCustomObject]@{
     }
   }
   collections = $collections
-  routingBundles = $routingBundles | ForEach-Object {
+  routingBundles = @($routingBundles | ForEach-Object {
     [PSCustomObject]@{
       id          = $_.id
       name        = $_.name
@@ -260,7 +265,7 @@ $indexObj = [PSCustomObject]@{
       profiles    = $_.profiles
       description = $_.description
     }
-  }
+  })
 }
 $indexJson = $indexObj | ConvertTo-Json -Depth 6
 $tempIndex = New-TemporaryFile
