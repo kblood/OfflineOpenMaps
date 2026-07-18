@@ -12,6 +12,10 @@ test('downloaded Denmark web pack routes inside its open subpack', async ({ page
 
   const packButton = page.getByRole('button', { name: /Denmark — Northwest Jutland/ });
   await expect(packButton).toBeVisible({ timeout: 30_000 });
+  // National routing is an optional companion, not a disguised map pack.
+  // The catalogue/UI contract must expose its separate install action before
+  // any regional pack is opened.
+  await expect(page.getByRole('button', { name: 'Enable Denmark-wide car routing' })).toBeVisible();
   await packButton.click();
 
   // Download + hash verification + sqlite-wasm opening happen before Route
