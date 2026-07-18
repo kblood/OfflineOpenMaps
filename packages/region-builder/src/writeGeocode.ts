@@ -78,6 +78,7 @@ export function writeGeocodeDb(outPath: string, data: SyntheticData): void {
         way_id INTEGER
       );
       CREATE INDEX edges_from ON edges(from_node);
+      CREATE INDEX edges_to ON edges(to_node);
 
       CREATE VIRTUAL TABLE edges_rtree USING rtree(
         id, min_lat, max_lat, min_lon, max_lon

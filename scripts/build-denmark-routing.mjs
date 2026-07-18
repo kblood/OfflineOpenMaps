@@ -62,6 +62,9 @@ try {
       UNIQUE(from_node, to_node, way_id)
     );
     CREATE INDEX edges_from ON edges(from_node);
+    -- Country-scale search expands from both endpoints, so reverse-edge
+    -- lookup must be indexed rather than scanning the national graph.
+    CREATE INDEX edges_to ON edges(to_node);
   `);
 
   for (const id of collection.members) {
