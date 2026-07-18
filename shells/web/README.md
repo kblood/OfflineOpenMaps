@@ -87,8 +87,12 @@ separate, merged car-routing companion from the 28 regional graphs. It uses
 their shared OSM node IDs to cross pack boundaries as one graph, rather than
 stitching separate route results. The companion is verified with Copenhagen →
 Aarhus before publishing. It is intentionally separate from map packs because
-the national graph is much larger than a regional map download; the current
-web picker continues to provide detailed routing inside the open map pack.
+the national graph is much larger than a regional map download. In the web
+picker, choose **Enable Denmark-wide car routing** to download it separately;
+car routes with Denmark-wide coordinates then automatically use that graph,
+while the open regional pack continues to provide tiles, search, and detailed
+bike/foot routing. Route coordinates can also be entered directly, which makes
+cross-region trips possible without switching the map pack first.
 
 ## Roadmap
 
