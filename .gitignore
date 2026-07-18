@@ -21,8 +21,7 @@ packages/region-builder/tests/fixtures/real/
 data/
 
 # Generated national-routing companions are published separately.
-routing/*.sqlite
-routing/*.json
+routing/
 
 # Editor
 .vscode/
