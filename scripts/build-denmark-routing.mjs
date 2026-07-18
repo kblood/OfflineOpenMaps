@@ -5,7 +5,7 @@
  * so merging their road graphs produces one continuous graph at region edges
  * without guessing where a route should leave a subpack.
  *
- * This intentionally contains a car-routing backbone (40 km/h+ by default):
+ * This intentionally contains a car-routing backbone (50 km/h+ by default):
  * tiles, search indexes, addresses, building geometry, and local-only
  * walking/cycling edges remain in regional packs. Keeping the country
  * companion compact makes a browser download and a country-scale query
@@ -29,7 +29,7 @@ const flagValue = (name) => {
   return index < 0 ? undefined : args[index + 1];
 };
 const outPath = resolve(root, flagValue('--out') ?? 'routing/denmark-routing.sqlite');
-const minSpeed = Number(flagValue('--min-speed') ?? '40');
+const minSpeed = Number(flagValue('--min-speed') ?? '50');
 if (!Number.isFinite(minSpeed) || minSpeed < 0) throw new Error('--min-speed must be a non-negative number');
 const collection = JSON.parse(await BunOrNodeRead(resolve(root, 'config/denmark-collection.json')));
 

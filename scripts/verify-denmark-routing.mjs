@@ -11,20 +11,21 @@ if (!existsSync(dbPath)) throw new Error(`routing companion not found: ${dbPath}
 
 const router = new InternalRouter(dbPath);
 try {
-  // Copenhagen → Aarhus crosses the Zealand/Jutland regional boundary and is
-  // therefore a meaningful proof that this is one national graph, not a
-  // regional router with a larger filename.
-  const route = await router.route({
-    profile: 'car',
-    waypoints: [
-      { lat: 55.6761, lon: 12.5683 },
-      { lat: 56.1629, lon: 10.2039 },
-    ],
-  });
-  if (route.geometry.length < 2 || route.distanceM < 100_000) {
-    throw new Error(`cross-Denmark route is implausible: ${route.geometry.length} points, ${route.distanceM} m`);
+  // These cover both Storebælt crossings and the Jutland north/south axis.
+  // Together they prove the companion is one graph across regional seams,
+  // rather than a larger-named regional router.
+  const checks = [
+    ['Copenhagen → Aarhus', { lat: 55.6761, lon: 12.5683 }, { lat: 56.1629, lon: 10.2039 }, 100_000],
+    ['Odense → Copenhagen', { lat: 55.4038, lon: 10.4024 }, { lat: 55.6761, lon: 12.5683 }, 80_000],
+    ['Aalborg → Esbjerg', { lat: 57.0488, lon: 9.9217 }, { lat: 55.4765, lon: 8.4594 }, 150_000],
+  ];
+  for (const [name, from, to, minDistanceM] of checks) {
+    const route = await router.route({ profile: 'car', waypoints: [from, to] });
+    if (route.geometry.length < 2 || route.distanceM < minDistanceM) {
+      throw new Error(`${name} is implausible: ${route.geometry.length} points, ${route.distanceM} m`);
+    }
+    console.log(`PASS ${name}: ${(route.distanceM / 1000).toFixed(1)} km, ${Math.round(route.durationS / 60)} min`);
   }
-  console.log(`PASS Copenhagen → Aarhus: ${(route.distanceM / 1000).toFixed(1)} km, ${Math.round(route.durationS / 60)} min`);
 } finally {
   await router.close();
 }

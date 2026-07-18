@@ -127,7 +127,7 @@ npm run build -w @openmaps/platform-node
 node scripts/verify-denmark-routing.mjs
 ```
 
-The default is a 40 km/h-and-above car backbone, which keeps the companion
+The default is a 50 km/h-and-above car backbone, which keeps the companion
 substantially smaller than the exhaustive graph while retaining a verified
 Copenhagen-to-Aarhus route. Use `--min-speed 0` only for an exhaustive local
 experiment; it is too large for a practical browser download. Bike and foot
