@@ -11,9 +11,10 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 
-const root = resolve(new URL('..', import.meta.url).pathname);
+const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const packsDir = join(root, 'packs');
 const collection = JSON.parse(await readFile(join(root, 'config', 'denmark-collection.json'), 'utf8'));
 const memberIds = collection.members;
