@@ -36,7 +36,7 @@ try {
   db.exec(`
     PRAGMA journal_mode = DELETE;
     PRAGMA synchronous = NORMAL;
-    DELETE FROM places_fts;
+    DROP TABLE places_fts;
     DELETE FROM places_rtree;
     DELETE FROM parcels;
     DELETE FROM places;
@@ -82,7 +82,12 @@ try {
 
   process.stdout.write('Rebuilding search and spatial indexes…\n');
   db.exec(`
-    INSERT INTO places_fts(places_fts) VALUES ('rebuild');
+    CREATE VIRTUAL TABLE places_fts USING fts5(
+      display_name, alt_names, admin_path,
+      content='places', content_rowid='rowid'
+    );
+    INSERT INTO places_fts (rowid, display_name, alt_names, admin_path)
+      SELECT rowid, display_name, '', COALESCE(admin_path, '') FROM places;
     INSERT INTO places_rtree (id, min_lat, max_lat, min_lon, max_lon)
       SELECT rowid, lat, lat, lon, lon FROM places;
     INSERT INTO nodes_rtree (id, min_lat, max_lat, min_lon, max_lon)
