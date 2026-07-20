@@ -30,9 +30,29 @@ describe('validateManifest', () => {
     expect(() => validateManifest(validManifest)).not.toThrow();
   });
 
-  it('rejects wrong schemaVersion', () => {
-    expect(() => validateManifest({ ...validManifest, schemaVersion: 2 }))
+  it('rejects unsupported schemaVersion', () => {
+    expect(() => validateManifest({ ...validManifest, schemaVersion: 3 }))
       .toThrowError(ManifestValidationError);
+  });
+
+  it('accepts a unified SQLite country pack', () => {
+    const database = { path: 'openmaps.sqlite', bytes: 350_000_000, sha256: 'd'.repeat(64) };
+    const unified = {
+      ...validManifest,
+      schemaVersion: 2,
+      files: { tiles: database, geocode: database, routing: database, database },
+    };
+    expect(() => validateManifest(unified)).not.toThrow();
+  });
+
+  it('rejects schema v2 when logical files do not alias its database', () => {
+    const database = { path: 'openmaps.sqlite', bytes: 350_000_000, sha256: 'd'.repeat(64) };
+    const unified = {
+      ...validManifest,
+      schemaVersion: 2,
+      files: { tiles: validManifest.files.tiles, geocode: database, routing: database, database },
+    };
+    expect(() => validateManifest(unified)).toThrow(/exact alias/);
   });
 
   it('rejects malformed id', () => {

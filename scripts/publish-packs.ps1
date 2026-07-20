@@ -5,7 +5,7 @@
 
 .DESCRIPTION
   Walks $PacksDir for pack subfolders (each must contain manifest.json,
-  tiles.mbtiles, and geocode.sqlite). For each one:
+  tiles.mbtiles + geocode.sqlite, or one schema-v2 openmaps.sqlite). For each one:
     1. scp the folder to /var/www/html/openmaps/packs/<id>/
     2. Build a packs.json index combining every pack's metadata.
     3. scp packs.json LAST (atomically, via tmp + mv) so the web shell
@@ -82,25 +82,34 @@ function Invoke-Scp([string]$Source, [string]$Destination) {
   if ($LASTEXITCODE -ne 0) { throw "scp failed: $Source -> $Destination" }
 }
 
-# Enumerate pack subfolders. A valid pack folder has all three of
-# manifest.json, tiles.mbtiles, geocode.sqlite. Anything else is
-# skipped with a warning rather than failing the whole publish.
+# Enumerate pack subfolders. A valid legacy pack has manifest.json,
+# tiles.mbtiles and geocode.sqlite; a schema-v2 unified pack has
+# manifest.json and openmaps.sqlite. Anything else is skipped with a warning.
 $packs = @()
 Get-ChildItem -Path $PacksDir -Directory | ForEach-Object {
   $dir = $_.FullName
   $manifestPath = Join-Path $dir 'manifest.json'
   $tilesPath    = Join-Path $dir 'tiles.mbtiles'
   $geocodePath  = Join-Path $dir 'geocode.sqlite'
-  if (-not (Test-Path $manifestPath) -or -not (Test-Path $tilesPath) -or -not (Test-Path $geocodePath)) {
-    Write-Warning "Skipping $($_.Name): missing manifest/tiles/geocode"
+  $databasePath = Join-Path $dir 'openmaps.sqlite'
+  if (-not (Test-Path $manifestPath)) {
+    Write-Warning "Skipping $($_.Name): missing manifest.json"
     return
   }
   $manifestRaw = Get-Content $manifestPath -Raw
   $manifest = $manifestRaw | ConvertFrom-Json
+  $isUnified = [int]$manifest.schemaVersion -eq 2
+  if ($isUnified -and -not (Test-Path $databasePath)) {
+    Write-Warning "Skipping $($_.Name): schema-v2 manifest is missing openmaps.sqlite"
+    return
+  }
+  if (-not $isUnified -and (-not (Test-Path $tilesPath) -or -not (Test-Path $geocodePath))) {
+    Write-Warning "Skipping $($_.Name): missing manifest/tiles/geocode"
+    return
+  }
   $totalBytes =
     (Get-Item $manifestPath).Length +
-    (Get-Item $tilesPath).Length +
-    (Get-Item $geocodePath).Length
+    $(if ($isUnified) { (Get-Item $databasePath).Length } else { (Get-Item $tilesPath).Length + (Get-Item $geocodePath).Length })
 
   # ConvertFrom-Json deserializes ISO 8601 strings into [DateTime] in
   # local time and ConvertTo-Json then emits them with locale formatting

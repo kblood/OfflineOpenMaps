@@ -42,10 +42,10 @@ network-severed.
 
 | Concern | Choice | Why |
 | ------- | ------ | --- |
-| Tile format | **MBTiles (SQLite + tiles BLOBs)** | Trivially writeable from Node, single file, Electron file:// happy |
+| Tile format | **MBTiles tables in SQLite** | Standard MBTiles tables; schema-v2 country packs keep tiles, search and routing in one SQLite file |
 | Tile renderer | **MapLibre GL JS** with custom `omap://` protocol | Standard vector renderer; protocol handler routes tile reads through IPC |
-| Geocoding | **SQLite FTS5 + R*Tree, one DB per region** | Same DB serves forward (FTS5) and reverse (R*Tree) |
-| Routing engine | **InternalRouter — JS Dijkstra over OSM road graph in SQLite** | Real graph-based; same DB shared with geocoder; no native deps |
+| Geocoding | **SQLite FTS5 + R*Tree** | Same database serves forward (FTS5) and reverse (R*Tree) |
+| Routing engine | **InternalRouter — JS Dijkstra over OSM road graph in SQLite** | Real graph-based; schema-v2 country packs share one database with tiles and geocoding |
 | SQLite binding | **`node:sqlite`** (built into Node 22.5+ / Electron 42+) | Zero native compile, ships FTS5 + R*Tree by default |
 | Desktop shell | Electron 42 with strict CSP and `contextIsolation` | Bundled Node 22.22 has node:sqlite |
 | UI | React 18 + Vite 5 + MapLibre GL JS 4 | Boring; not a research project |
@@ -109,6 +109,11 @@ the map. Click "Go offline & self-test" in the sidebar — the result table
 should show four green dots and the message **"✓ Fully offline."**
 
 ## What v2 still needs
+
+Country-scale web installation is tracked in [COUNTRY_PACKS.md](./COUNTRY_PACKS.md).
+The builder can now create one SQLite database for a country; browser loading
+still needs the documented OPFS-VFS migration before a multi-gigabyte pack is
+published to the web catalog.
 
 ### Nice-to-haves
 

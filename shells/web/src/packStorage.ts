@@ -2,8 +2,12 @@ import type { RegionManifest } from '@openmaps/core';
 
 export interface StoredPack {
   manifest: RegionManifest;
-  tiles: ArrayBuffer;
-  geocode: ArrayBuffer;
+  /** Present for schema v1 split packs. */
+  tiles?: ArrayBuffer;
+  /** Present for schema v1 split packs. */
+  geocode?: ArrayBuffer;
+  /** Present for schema v2 unified SQLite packs. */
+  database?: ArrayBuffer;
   installedAt: string;
 }
 
@@ -15,6 +19,8 @@ interface StoredPackIndex {
   tiles?: ArrayBuffer;
   /** Kept only for browsers without OPFS support. */
   geocode?: ArrayBuffer;
+  /** Kept only for browsers without OPFS support, for schema v2 packs. */
+  database?: ArrayBuffer;
 }
 
 const DB_NAME = 'openmaps-v2';
@@ -64,12 +70,19 @@ export const packStorage = {
         return {
           manifest: stored.manifest,
           installedAt: stored.installedAt,
-          tiles: await readOpfsFile(dir, 'tiles.mbtiles'),
-          geocode: await readOpfsFile(dir, 'geocode.sqlite'),
+          ...(stored.manifest.schemaVersion === 2
+            ? { database: await readOpfsFile(dir, stored.manifest.files.database!.path) }
+            : {
+                tiles: await readOpfsFile(dir, stored.manifest.files.tiles.path),
+                geocode: await readOpfsFile(dir, stored.manifest.files.geocode.path),
+              }),
         };
       } catch {
         return undefined;
       }
+    }
+    if (stored.manifest.schemaVersion === 2) {
+      return stored.database ? { manifest: stored.manifest, installedAt: stored.installedAt, database: stored.database } : undefined;
     }
     if (!stored.tiles || !stored.geocode) return undefined;
     return {
@@ -83,8 +96,14 @@ export const packStorage = {
   async put(pack: StoredPack): Promise<void> {
     if (await supportsOpfs()) {
       const dir = await getOpfsPackDir(pack.manifest.id, true);
-      await writeOpfsFile(dir, 'tiles.mbtiles', pack.tiles);
-      await writeOpfsFile(dir, 'geocode.sqlite', pack.geocode);
+      if (pack.manifest.schemaVersion === 2) {
+        if (!pack.database) throw new Error('unified pack is missing its database bytes');
+        await writeOpfsFile(dir, pack.manifest.files.database!.path, pack.database);
+      } else {
+        if (!pack.tiles || !pack.geocode) throw new Error('split pack is missing tiles or geocode bytes');
+        await writeOpfsFile(dir, pack.manifest.files.tiles.path, pack.tiles);
+        await writeOpfsFile(dir, pack.manifest.files.geocode.path, pack.geocode);
+      }
       await writeOpfsFile(dir, 'manifest.json', JSON.stringify(pack.manifest));
       await transaction('readwrite', (store) => store.put({
         manifest: pack.manifest,

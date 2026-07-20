@@ -34,11 +34,9 @@ AddType application/vnd.sqlite3 .sqlite
   </FilesMatch>
 </IfModule>
 
-# Cross-origin isolation. Uncomment when the web shell starts using
-# OPFS sync-access or any SharedArrayBuffer-backed worker — sqlite-wasm's
-# OPFS persistence variant requires both headers. Leaving them off for
-# the MVP keeps the live page simpler to embed and debug.
-# <IfModule mod_headers.c>
-#   Header set Cross-Origin-Opener-Policy "same-origin"
-#   Header set Cross-Origin-Embedder-Policy "require-corp"
-# </IfModule>
+# Cross-origin isolation is required by SQLite's OPFS worker VFS. All map
+# assets are same-origin, so this does not require a permissive CORP policy.
+<IfModule mod_headers.c>
+  Header set Cross-Origin-Opener-Policy "same-origin"
+  Header set Cross-Origin-Embedder-Policy "require-corp"
+</IfModule>

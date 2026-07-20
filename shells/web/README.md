@@ -30,18 +30,18 @@ verified pack store.
 The MVP loads a region pack from a **user-picked folder**:
 
 1. Click **Choose pack folder…** in the sidebar.
-2. Select the directory that contains:
-   - `manifest.json`
-   - `tiles.mbtiles`
-   - `geocode.sqlite`
-3. The map renders once the three files have been deserialized into in-memory
-   SQLite databases.
+2. Select either a legacy directory containing `manifest.json`,
+   `tiles.mbtiles` and `geocode.sqlite`, or a schema-v2 country directory
+   containing `manifest.json` and `openmaps.sqlite`.
+3. The map renders once the required SQLite data has been deserialized.
 
 After a successful checksum verification, the pack is installed in the
 browser's persistent storage and can be reopened after a page reload. Modern
 browsers store pack files in OPFS; browsers without OPFS use IndexedDB. The
-SQLite runtime still deserializes an open pack into memory. Moving SQLite itself
-to its worker-based OPFS VFS is a later performance optimization.
+SQLite runtime still deserializes an open pack into memory. A schema-v2 pack
+shares one connection between map, search and routing, but a multi-gigabyte
+country pack still needs the worker-based OPFS VFS migration described in
+[COUNTRY_PACKS.md](../../COUNTRY_PACKS.md) before browser publication.
 
 ## Differences vs the Electron shell
 

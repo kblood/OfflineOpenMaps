@@ -89,6 +89,16 @@ function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 }
 
 async function verifyStoredPack(pack: StoredPack): Promise<{ ok: true } | { ok: false; problem: string }> {
+  if (pack.manifest.schemaVersion === 2) {
+    const file = pack.manifest.files.database!;
+    const bytes = pack.database;
+    if (!bytes) return { ok: false, problem: 'unified pack is missing its database bytes' };
+    if (bytes.byteLength !== file.bytes) {
+      return { ok: false, problem: `database size mismatch: expected ${file.bytes}, got ${bytes.byteLength}` };
+    }
+    if ((await sha256(bytes)) !== file.sha256) return { ok: false, problem: 'database sha256 mismatch' };
+    return { ok: true };
+  }
   if (pack.manifest.files.routing.path !== pack.manifest.files.geocode.path) {
     return {
       ok: false,
@@ -100,6 +110,7 @@ async function verifyStoredPack(pack: StoredPack): Promise<{ ok: true } | { ok: 
     ['geocode', pack.manifest.files.geocode, pack.geocode],
   ] as const;
   for (const [name, file, bytes] of files) {
+    if (!bytes) return { ok: false, problem: `${name} bytes missing` };
     if (bytes.byteLength !== file.bytes) {
       return { ok: false, problem: `${name} size mismatch: expected ${file.bytes}, got ${bytes.byteLength}` };
     }
@@ -113,6 +124,26 @@ async function openStoredPack(stored: StoredPack): Promise<RegionManifest> {
   if (!verification.ok) throw new Error(`pack '${stored.manifest.id}' failed verification: ${verification.problem}`);
   if (currentPack) await currentPack.close();
 
+  if (stored.manifest.schemaVersion === 2) {
+    if (!stored.database) throw new Error(`unified pack '${stored.manifest.id}' is missing its database bytes`);
+    // One connection serves tiles, search and routing. This is the critical
+    // difference from a split pack: do not deserialize a country database
+    // twice merely because it has two logical consumers.
+    const database = await openSqliteFromBytes(new Uint8Array(stored.database));
+    const tiles = new MbtilesTileSource(database);
+    const geocode = new WebGeocodeIndex(database);
+    const router = new InternalRouter(database);
+    currentPack = {
+      manifest: stored.manifest,
+      tiles,
+      geocode,
+      router,
+      async close() { database.close(); },
+    };
+    currentPackId = stored.manifest.id;
+    return stored.manifest;
+  }
+  if (!stored.tiles || !stored.geocode) throw new Error(`split pack '${stored.manifest.id}' is missing data bytes`);
   const tilesDb = await openSqliteFromBytes(new Uint8Array(stored.tiles));
   const geocodeDb = await openSqliteFromBytes(new Uint8Array(stored.geocode));
   const tiles = new MbtilesTileSource(tilesDb);
@@ -162,19 +193,22 @@ export async function loadPackFromDirectory(files: FileList): Promise<RegionMani
   const manifestFile = byName.get('manifest.json');
   const tilesFile = byName.get('tiles.mbtiles');
   const geocodeFile = byName.get('geocode.sqlite');
+  const databaseFile = byName.get('openmaps.sqlite');
 
   if (!manifestFile) throw new Error('pack folder is missing manifest.json');
-  if (!tilesFile) throw new Error('pack folder is missing tiles.mbtiles');
-  if (!geocodeFile) throw new Error('pack folder is missing geocode.sqlite');
-
   const manifest = validateManifest(JSON.parse(await manifestFile.text()) as unknown);
+  if (manifest.schemaVersion === 2 && !databaseFile) throw new Error('unified pack folder is missing openmaps.sqlite');
+  if (manifest.schemaVersion === 1 && !tilesFile) throw new Error('pack folder is missing tiles.mbtiles');
+  if (manifest.schemaVersion === 1 && !geocodeFile) throw new Error('pack folder is missing geocode.sqlite');
 
-  const stored: StoredPack = {
-    manifest,
-    tiles: await tilesFile.arrayBuffer(),
-    geocode: await geocodeFile.arrayBuffer(),
-    installedAt: new Date().toISOString(),
-  };
+  const stored: StoredPack = manifest.schemaVersion === 2
+    ? { manifest, database: await databaseFile!.arrayBuffer(), installedAt: new Date().toISOString() }
+    : {
+        manifest,
+        tiles: await tilesFile!.arrayBuffer(),
+        geocode: await geocodeFile!.arrayBuffer(),
+        installedAt: new Date().toISOString(),
+      };
   const verification = await verifyStoredPack(stored);
   if (!verification.ok) throw new Error(`pack failed verification: ${verification.problem}`);
   await packStorage.put(stored);
@@ -285,7 +319,7 @@ async function installNationalRouting(entry: RemoteRoutingBundle, onProgress?: (
 }
 
 export interface PackDownloadProgress {
-  step: 'manifest' | 'tiles' | 'geocode';
+  step: 'manifest' | 'tiles' | 'geocode' | 'database';
   bytesReceived: number;
   /** 0 if Content-Length wasn't sent. */
   bytesTotal: number;
@@ -325,6 +359,21 @@ export async function loadPackFromUrl(
   // revalidation, which is enough on a well-behaved server but can still
   // hand back a stale body via a misconfigured proxy or service worker.
   const v = encodeURIComponent(manifest.builtAt);
+
+  if (manifest.schemaVersion === 2) {
+    const databaseBytes = await fetchWithProgress(`${base}${manifest.files.database!.path}?v=${v}`, (received, total) => {
+      onProgress?.({ step: 'database', bytesReceived: received, bytesTotal: total });
+    });
+    const stored: StoredPack = {
+      manifest,
+      database: copyToArrayBuffer(databaseBytes),
+      installedAt: new Date().toISOString(),
+    };
+    const verification = await verifyStoredPack(stored);
+    if (!verification.ok) throw new Error(`downloaded pack failed verification: ${verification.problem}`);
+    await packStorage.put(stored);
+    return openStoredPack(stored);
+  }
 
   const tilesBytes = await fetchWithProgress(`${base}${manifest.files.tiles.path}?v=${v}`, (received, total) => {
     onProgress?.({ step: 'tiles', bytesReceived: received, bytesTotal: total });
