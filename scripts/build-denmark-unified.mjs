@@ -52,6 +52,12 @@ try {
       tile_data BLOB,
       PRIMARY KEY (zoom_level, tile_column, tile_row)
     );
+    -- Regional packs overlap. This natural key removes duplicate directed
+    -- OSM segments while retaining distinct access/speed variants.
+    CREATE UNIQUE INDEX edges_natural_unique ON edges(
+      from_node, to_node, way_id, allows_car, allows_bike, allows_foot,
+      max_speed_kmh, COALESCE(road_name, '')
+    );
   `);
 
   for (const [i, id] of memberIds.entries()) {
@@ -68,7 +74,7 @@ try {
         SELECT id, label, ejerlavkode, ejerlavnavn, matrikelnr, rings_json FROM source_geo.parcels;
       INSERT OR IGNORE INTO nodes (id, lat, lon)
         SELECT id, lat, lon FROM source_geo.nodes;
-      INSERT INTO edges (from_node, to_node, length_m, max_speed_kmh, allows_car, allows_bike, allows_foot, road_name, way_id)
+      INSERT OR IGNORE INTO edges (from_node, to_node, length_m, max_speed_kmh, allows_car, allows_bike, allows_foot, road_name, way_id)
         SELECT from_node, to_node, length_m, max_speed_kmh, allows_car, allows_bike, allows_foot, road_name, way_id
         FROM source_geo.edges;
       INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data)
@@ -96,6 +102,7 @@ try {
       SELECT e.id, MIN(n1.lat, n2.lat), MAX(n1.lat, n2.lat), MIN(n1.lon, n2.lon), MAX(n1.lon, n2.lon)
       FROM edges e JOIN nodes n1 ON n1.id = e.from_node JOIN nodes n2 ON n2.id = e.to_node
       GROUP BY e.id;
+    CREATE INDEX edges_from_profile ON edges(from_node, allows_car, allows_bike, allows_foot);
     ANALYZE;
     VACUUM;
   `);
