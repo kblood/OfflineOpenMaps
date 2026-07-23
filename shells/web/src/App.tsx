@@ -9,6 +9,7 @@ import {
   loadPackFromDirectory,
   loadPackFromUrl,
   fetchAvailablePacks,
+  getWebPackCompatibilityError,
   getPackStorageEstimate,
   type RemotePackEntry,
   type RemotePackCollection,
@@ -42,6 +43,12 @@ export function App(): JSX.Element {
   const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [progress, setProgress] = useState<PackDownloadProgress | null>(null);
+  const [collectionProgress, setCollectionProgress] = useState<{
+    current: number;
+    total: number;
+    packName: string;
+    progress: PackDownloadProgress | null;
+  } | null>(null);
   const [routingProgress, setRoutingProgress] = useState<RoutingDownloadProgress | null>(null);
   const [routingDownloading, setRoutingDownloading] = useState<string | null>(null);
   const [loadingLocal, setLoadingLocal] = useState(false);
@@ -143,6 +150,56 @@ export function App(): JSX.Element {
       setProgress(null);
     }
   }, [refreshInstalledPacks]);
+
+  const downloadCollection = useCallback(async (
+    collection: RemotePackCollection,
+    members: RemotePackEntry[],
+  ) => {
+    setLoadError(null);
+    setDownloading(collection.id);
+    setProgress(null);
+    setCollectionProgress(null);
+    try {
+      if (members.length !== collection.members.length) {
+        throw new Error(`The catalog is missing ${collection.members.length - members.length} regions from ${collection.name}`);
+      }
+      const installedIds = new Set(installedPacks.map((pack) => pack.id));
+      const remaining = members.filter((member) => !installedIds.has(member.id));
+      for (const member of remaining) {
+        const compatibilityError = getWebPackCompatibilityError(member);
+        if (compatibilityError) throw new Error(`${member.name}: ${compatibilityError}`);
+      }
+      for (let index = 0; index < remaining.length; index += 1) {
+        const member = remaining[index]!;
+        setCollectionProgress({ current: index + 1, total: remaining.length, packName: member.name, progress: null });
+        await loadPackFromUrl(
+          `./packs/${member.baseUrl}`,
+          (packProgress) => setCollectionProgress({
+            current: index + 1,
+            total: remaining.length,
+            packName: member.name,
+            progress: packProgress,
+          }),
+          false,
+        );
+      }
+      const firstId = collection.members[0];
+      if (!firstId) throw new Error(`${collection.name} has no regions`);
+      const opened = await api.packs.open(firstId);
+      setManifest(opened);
+      setStart(null);
+      setEnd(null);
+      setStartAddress(null);
+      setEndAddress(null);
+      setPicking(null);
+      await refreshInstalledPacks();
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDownloading(null);
+      setCollectionProgress(null);
+    }
+  }, [installedPacks, refreshInstalledPacks]);
 
   const onFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -323,6 +380,11 @@ export function App(): JSX.Element {
                   const members = collection.members
                     .map((id) => remotePacks.find((pack) => pack.id === id))
                     .filter((pack): pack is RemotePackEntry => Boolean(pack));
+                  const installedIds = new Set(installedPacks.map((pack) => pack.id));
+                  const remainingCount = members.filter((member) => !installedIds.has(member.id)).length;
+                  const totalBytes = members.reduce((sum, member) => sum + member.totalBytes, 0);
+                  const downloadingCollection = downloading === collection.id;
+                  const missingCatalogMembers = members.length !== collection.members.length;
                   return (
                     <div key={collection.id} style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 7 }}>
                       <strong style={{ fontSize: 13 }}>{collection.name}</strong>
@@ -330,8 +392,38 @@ export function App(): JSX.Element {
                         {collection.description}
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>
-                        Choose a region to download. Search and detailed bike/foot routing work inside the open region; neighbouring regions overlap at their edges.
+                        Download individual regions or install the full collection. Routing automatically joins every downloaded neighbouring region through shared OSM nodes.
                       </div>
+                      <button
+                        className="primary"
+                        onClick={() => void downloadCollection(collection, members)}
+                        disabled={downloading !== null || missingCatalogMembers}
+                        style={{ marginTop: 7, width: '100%' }}
+                        title={missingCatalogMembers ? 'The hosted catalog does not contain every collection member' : undefined}
+                      >
+                        {downloadingCollection
+                          ? `Downloading ${collectionProgress?.current ?? 0}/${collectionProgress?.total ?? remainingCount}…`
+                          : remainingCount === 0
+                            ? `Open all ${members.length} downloaded regions`
+                            : `Download ${remainingCount === members.length ? 'all' : `remaining ${remainingCount}`} regions · ${formatBytes(totalBytes)}`}
+                      </button>
+                      {downloadingCollection && collectionProgress ? (
+                        <div style={{ marginTop: 5 }}>
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                            {collectionProgress.packName} · {collectionProgress.current}/{collectionProgress.total}
+                          </div>
+                          <div className="progress" style={{ marginTop: 3 }}>
+                            <div
+                              className="progress-bar"
+                              style={{
+                                width: collectionProgress.progress?.bytesTotal
+                                  ? `${Math.min(100, Math.round((collectionProgress.progress.bytesReceived / collectionProgress.progress.bytesTotal) * 100))}%`
+                                  : '40%',
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ) : null}
                       {remoteRoutingBundles.filter((bundle) => bundle.country === collection.country).map((bundle) => {
                         const installed = installedRoutingBundles.includes(bundle.id);
                         const active = activeRoutingBundle === bundle.id;
@@ -363,17 +455,23 @@ export function App(): JSX.Element {
                         );
                       })}
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
-                        {members.map((pack) => (
-                          <button
-                            key={pack.id}
-                            onClick={() => void downloadPack(pack)}
-                            disabled={downloading !== null}
-                            style={{ textAlign: 'left' }}
-                            title={`${pack.country} · bbox ${pack.bbox.map((n) => n.toFixed(3)).join(', ')}`}
-                          >
-                            {pack.name} <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>({formatBytes(pack.totalBytes)})</span>
-                          </button>
-                        ))}
+                        {members.map((pack) => {
+                          const compatibilityError = getWebPackCompatibilityError(pack);
+                          return (
+                            <button
+                              key={pack.id}
+                              onClick={() => void downloadPack(pack)}
+                              disabled={downloading !== null || compatibilityError !== null}
+                              style={{ textAlign: 'left' }}
+                              title={compatibilityError ?? `${pack.country} · bbox ${pack.bbox.map((n) => n.toFixed(3)).join(', ')}`}
+                            >
+                              {pack.name} <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>({formatBytes(pack.totalBytes)})</span>
+                              {compatibilityError ? (
+                                <div style={{ color: 'var(--text-muted)', fontSize: 10, marginTop: 2 }}>{compatibilityError}</div>
+                              ) : null}
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
                   );
@@ -390,6 +488,7 @@ export function App(): JSX.Element {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 {remotePacks.filter((p) => !remoteCollections.some((c) => c.members.includes(p.id))).map((p) => {
                   const isThis = downloading === p.id;
+                  const compatibilityError = getWebPackCompatibilityError(p);
                   const pct =
                     isThis && progress && progress.bytesTotal > 0
                       ? Math.min(
@@ -401,9 +500,9 @@ export function App(): JSX.Element {
                     <button
                       key={p.id}
                       onClick={() => void downloadPack(p)}
-                      disabled={downloading !== null}
+                      disabled={downloading !== null || compatibilityError !== null}
                       style={{ textAlign: 'left' }}
-                      title={`${p.country} · bbox ${p.bbox.map((n) => n.toFixed(3)).join(', ')}`}
+                      title={compatibilityError ?? `${p.country} · bbox ${p.bbox.map((n) => n.toFixed(3)).join(', ')}`}
                     >
                       <div>
                         {p.name}{' '}
@@ -411,6 +510,9 @@ export function App(): JSX.Element {
                           ({formatBytes(p.totalBytes)})
                         </span>
                       </div>
+                      {compatibilityError ? (
+                        <div style={{ color: 'var(--text-muted)', fontSize: 10, marginTop: 2 }}>{compatibilityError}</div>
+                      ) : null}
                       {isThis ? (
                         <div style={{ marginTop: 6 }}>
                           <div className="progress">

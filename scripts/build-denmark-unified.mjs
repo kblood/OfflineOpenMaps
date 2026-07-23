@@ -8,8 +8,9 @@
  * merging their tables retains cross-region graph connectivity.
  */
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { copyFile, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
@@ -19,7 +20,8 @@ const packsDir = join(root, 'packs');
 const collection = JSON.parse(await readFile(join(root, 'config', 'denmark-collection.json'), 'utf8'));
 const memberIds = collection.members;
 const targetDir = join(packsDir, 'denmark');
-const targetDb = join(targetDir, 'openmaps.sqlite');
+const stagingDir = join(packsDir, `.staging-denmark-build-${process.pid}`);
+const targetDb = join(stagingDir, 'openmaps.sqlite');
 
 for (const id of memberIds) {
   for (const file of ['manifest.json', 'tiles.mbtiles', 'geocode.sqlite']) {
@@ -27,8 +29,10 @@ for (const id of memberIds) {
   }
 }
 
-await rm(targetDir, { recursive: true, force: true });
-await mkdir(targetDir, { recursive: true });
+// Keep the last verified country pack intact until the replacement is fully
+// built and closed. A failed merge must never destroy the usable artifact.
+await rm(stagingDir, { recursive: true, force: true });
+await mkdir(stagingDir, { recursive: true });
 await copyFile(join(packsDir, memberIds[0], 'geocode.sqlite'), targetDb);
 
 const db = new DatabaseSync(targetDb);
@@ -87,6 +91,9 @@ try {
   }
 
   process.stdout.write('Rebuilding search and spatial indexes…\n');
+  const [minLon, minLat, maxLon, maxLat] = collection.bbox;
+  const centerLon = (minLon + maxLon) / 2;
+  const centerLat = (minLat + maxLat) / 2;
   db.exec(`
     CREATE VIRTUAL TABLE places_fts USING fts5(
       display_name, alt_names, admin_path,
@@ -103,6 +110,12 @@ try {
       FROM edges e JOIN nodes n1 ON n1.id = e.from_node JOIN nodes n2 ON n2.id = e.to_node
       GROUP BY e.id;
     CREATE INDEX edges_from_profile ON edges(from_node, allows_car, allows_bike, allows_foot);
+    DELETE FROM metadata WHERE name IN ('name', 'description', 'bounds', 'center');
+    INSERT INTO metadata (name, value) VALUES
+      ('name', 'Denmark'),
+      ('description', 'OpenMaps unified Denmark pack'),
+      ('bounds', ${sql(collection.bbox.join(','))}),
+      ('center', ${sql(`${centerLon},${centerLat},7`)});
     ANALYZE;
     VACUUM;
   `);
@@ -118,7 +131,7 @@ try {
     country: 'DK',
     bbox: collection.bbox,
     builtAt: new Date().toISOString(),
-    builderCommit: process.env.GIT_COMMIT ?? 'd282bca',
+    builderCommit: resolveBuilderCommit(),
     files: { tiles: file, geocode: file, routing: file, database: file },
     selfTestAnchors: {
       searchTerms: ['Aarhus', 'København'],
@@ -127,11 +140,13 @@ try {
       tileSample: { z, x: Number(sample.tile_column), y: (1 << z) - 1 - Number(sample.tile_row) },
     },
   };
-  await writeFile(join(targetDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
-  process.stdout.write(`Done: ${targetDb}\n`);
+  await writeFile(join(stagingDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 } finally {
   db.close();
 }
+
+await promotePack(stagingDir, targetDir);
+process.stdout.write(`Done: ${join(targetDir, 'openmaps.sqlite')}\n`);
 
 function sql(path) { return `'${path.replaceAll("'", "''")}'`; }
 async function packFile(path) {
@@ -141,4 +156,45 @@ async function packFile(path) {
     createReadStream(path).on('data', (chunk) => hash.update(chunk)).on('error', reject).on('end', resolve);
   });
   return { path: 'openmaps.sqlite', bytes: info.size, sha256: hash.digest('hex') };
+}
+
+function resolveBuilderCommit() {
+  if (process.env.GIT_COMMIT && /^[0-9a-f]{7,40}$/i.test(process.env.GIT_COMMIT)) {
+    return process.env.GIT_COMMIT.toLowerCase();
+  }
+  return execFileSync('git', ['rev-parse', '--short', 'HEAD'], {
+    cwd: root,
+    encoding: 'utf8',
+  }).trim().toLowerCase();
+}
+
+async function promotePack(staged, live) {
+  const backup = `${live}.old-${process.pid}`;
+  await rm(backup, { recursive: true, force: true });
+  let movedLive = false;
+  try {
+    try {
+      await rename(live, backup);
+      movedLive = true;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+    await rename(staged, live);
+    if (movedLive) {
+      try {
+        await rm(backup, { recursive: true, force: true });
+      } catch (error) {
+        process.stderr.write(`WARN: promoted pack is live, but old backup cleanup failed: ${error.message}\n`);
+      }
+    }
+  } catch (error) {
+    // If promotion fails after moving the old pack aside, restore it. Leave
+    // the staged build available for diagnosis when restoration is possible.
+    try {
+      await stat(live);
+    } catch {
+      if (movedLive) await rename(backup, live);
+    }
+    throw error;
+  }
 }

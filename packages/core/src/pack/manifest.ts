@@ -157,6 +157,18 @@ function validatePackFile(raw: unknown, field: string): void {
   if (typeof f.path !== 'string' || f.path.length === 0) {
     throw new ManifestValidationError(`${field}.path missing`, field);
   }
+  const path = f.path as string;
+  const withoutTrailingSlash = path.endsWith('/') ? path.slice(0, -1) : path;
+  const pathSegments = withoutTrailingSlash.split('/');
+  if (
+    withoutTrailingSlash.length === 0 ||
+    path.includes('\\') ||
+    path.startsWith('/') ||
+    path.includes('//') ||
+    pathSegments.some((segment) => segment === '.' || segment === '..' || !/^[A-Za-z0-9._-]+$/.test(segment))
+  ) {
+    throw new ManifestValidationError(`${field}.path must be a safe relative path`, field);
+  }
   if (typeof f.bytes !== 'number' || !Number.isInteger(f.bytes) || f.bytes < 0) {
     throw new ManifestValidationError(`${field}.bytes must be non-negative integer`, field);
   }

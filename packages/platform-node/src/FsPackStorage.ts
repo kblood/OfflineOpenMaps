@@ -7,6 +7,7 @@ import { validateManifest } from '@openmaps/core';
 import { MbtilesTileSource } from './MbtilesTileSource.js';
 import { SqliteGeocodeIndex } from './SqliteGeocodeIndex.js';
 import { InternalRouter } from './InternalRouter.js';
+import { CompositeRouter } from './CompositeRouter.js';
 
 /**
  * Filesystem-backed pack storage. Each pack lives in `packsDir/<id>/` with
@@ -73,6 +74,28 @@ export class FsPackStorage implements PackStorage {
     };
   }
 
+  /**
+   * Open only the routing databases for a set of installed packs and expose
+   * them as one graph. Shared OSM node ids form the joins between packs.
+   */
+  async openCompositeRouter(packIds: readonly string[]): Promise<CompositeRouter> {
+    if (packIds.length === 0) throw new Error('cannot open a composite router without packs');
+    const sources = await Promise.all(packIds.map(async (packId) => {
+      const dir = join(this.packsDir, packId);
+      const raw = await readFile(join(dir, 'manifest.json'), 'utf8');
+      const manifest = validateManifest(JSON.parse(raw));
+      if (manifest.id !== packId) {
+        throw new Error(`pack id mismatch: dir=${packId} manifest=${manifest.id}`);
+      }
+      return {
+        id: manifest.id,
+        filePath: join(dir, manifest.files.routing.path),
+        bbox: manifest.bbox,
+      };
+    }));
+    return new CompositeRouter(sources);
+  }
+
   async verify(packId: string): Promise<{ ok: true } | { ok: false; problem: string }> {
     const dir = join(this.packsDir, packId);
     let manifest: RegionManifest;
@@ -83,8 +106,16 @@ export class FsPackStorage implements PackStorage {
       return { ok: false, problem: `manifest invalid: ${(err as Error).message}` };
     }
 
+    const verifiedPaths = new Map<string, { bytes: number; sha256: string }>();
     for (const [name, file] of Object.entries(manifest.files)) {
-      const path = join(dir, file.path);
+      const path = resolve(dir, file.path);
+      const previous = verifiedPaths.get(path);
+      if (previous) {
+        if (previous.bytes !== file.bytes || previous.sha256 !== file.sha256) {
+          return { ok: false, problem: `${name} conflicts with another manifest entry for ${file.path}` };
+        }
+        continue;
+      }
       try {
         const st = await stat(path);
         if (st.isDirectory()) {
@@ -98,6 +129,7 @@ export class FsPackStorage implements PackStorage {
         if (actual !== file.sha256) {
           return { ok: false, problem: `${name} sha256 mismatch` };
         }
+        verifiedPaths.set(path, { bytes: file.bytes, sha256: file.sha256 });
       } catch (err) {
         return { ok: false, problem: `${name} unreadable: ${(err as Error).message}` };
       }

@@ -1,7 +1,7 @@
 import { dialog, ipcMain, BrowserWindow } from 'electron';
 import { FsPackStorage } from '@openmaps/platform-node';
 import { runSelfTest } from '@openmaps/core';
-import type { RegionPack, SearchOptions, ReverseOptions, Profile } from '@openmaps/core';
+import type { RegionPack, SearchOptions, ReverseOptions, Profile, Router } from '@openmaps/core';
 
 /**
  * Central state: the renderer can have at most one pack open at a time. All
@@ -11,6 +11,26 @@ import type { RegionPack, SearchOptions, ReverseOptions, Profile } from '@openma
 let storage: FsPackStorage | null = null;
 let currentPack: RegionPack | null = null;
 let currentPackId: string | null = null;
+let compositeRouter: Router | null = null;
+
+async function closeCompositeRouter(): Promise<void> {
+  if (!compositeRouter) return;
+  await compositeRouter.close();
+  compositeRouter = null;
+}
+
+/** Use every installed pack from the open pack's country for routing. */
+async function rebuildCompositeRouter(): Promise<void> {
+  await closeCompositeRouter();
+  if (!storage || !currentPack) return;
+  const installed = await storage.listInstalled();
+  const packIds = installed
+    .filter((manifest) => manifest.country === currentPack!.manifest.country)
+    .map((manifest) => manifest.id);
+  // Avoid opening a second handle when the ordinary single-pack router is
+  // already exactly the graph we need.
+  if (packIds.length > 1) compositeRouter = await storage.openCompositeRouter(packIds);
+}
 
 export function initPackBridge(packsDir: string): void {
   storage = new FsPackStorage(packsDir);
@@ -35,10 +55,12 @@ export function initPackBridge(packsDir: string): void {
     const pack = await storage!.open(packId);
     currentPack = pack;
     currentPackId = packId;
+    await rebuildCompositeRouter();
     return pack.manifest;
   });
 
   ipcMain.handle('packs:close', async () => {
+    await closeCompositeRouter();
     if (currentPack) {
       await currentPack.close();
       currentPack = null;
@@ -66,10 +88,14 @@ export function initPackBridge(packsDir: string): void {
       srcDir,
       opts?.overwrite ? { overwrite: true } : {},
     );
+    if (currentPack && manifest.country === currentPack.manifest.country) {
+      await rebuildCompositeRouter();
+    }
     return { installed: true as const, manifest };
   });
 
   ipcMain.handle('packs:uninstall', async (_e, packId: string) => {
+    await closeCompositeRouter();
     // If the pack being uninstalled is currently open, close it first so
     // the SQLite file handle is released before rm() touches it.
     if (currentPack && currentPackId === packId) {
@@ -78,6 +104,7 @@ export function initPackBridge(packsDir: string): void {
       currentPackId = null;
     }
     await storage!.uninstall(packId);
+    await rebuildCompositeRouter();
   });
 
   ipcMain.handle('tiles:get', async (_e, z: number, x: number, y: number) => {
@@ -112,7 +139,7 @@ export function initPackBridge(packsDir: string): void {
       if (!currentPack) {
         throw new Error('no pack open');
       }
-      return currentPack.router.route({ waypoints, profile });
+      return (compositeRouter ?? currentPack.router).route({ waypoints, profile });
     },
   );
 
@@ -125,6 +152,7 @@ export function initPackBridge(packsDir: string): void {
 }
 
 export async function shutdownPackBridge(): Promise<void> {
+  await closeCompositeRouter();
   if (currentPack) {
     await currentPack.close();
     currentPack = null;

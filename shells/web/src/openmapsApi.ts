@@ -3,12 +3,12 @@
 // In Electron, the renderer talks to the main process over IPC via a
 // `window.openmaps.*` bridge. In the browser, every adapter (tile source,
 // geocode index, router) runs in-process against sqlite-wasm, so we
-// expose the same `api` object as a plain module-level singleton.
+// expose the same `api` object as a plain module-level singleton. Small legacy
+// packs run in memory; unified packs use SQLite's OPFS VFS in a Worker.
 //
-// MVP scope:
-//   - pack files are loaded from a user-selected directory (webkitdirectory),
-//     not OPFS — `packs.list()` returns at most one entry, the currently
-//     loaded pack.
+// Browser-specific scope:
+//   - pack files can be loaded from the hosted catalog or a user-selected
+//     directory; installations are indexed in IndexedDB and prefer OPFS.
 //   - in-app pack builder (Geofabrik / Overpass) is NOT available because
 //     both endpoints CORS-block browsers.
 //   - `offline.set` is a no-op; a service worker enforcement step is a
@@ -25,6 +25,7 @@ import type {
   SearchResult,
   ReverseResult,
   RouteResult,
+  Router,
   Profile,
   TileBytes,
   SelfTestReport,
@@ -34,7 +35,9 @@ import { openSqliteFromBytes, type WebDb } from './lib/sqlite.js';
 import { MbtilesTileSource } from './lib/MbtilesTileSource.js';
 import { WebGeocodeIndex } from './lib/GeocodeIndex.js';
 import { InternalRouter } from './lib/InternalRouter.js';
-import { packStorage, type StoredPack } from './packStorage.js';
+import { openOpfsRegionPack } from './lib/OpfsRegionPack.js';
+import { openOpfsCompositeRouter } from './lib/OpfsCompositeRouter.js';
+import { packStorage, supportsOpfsSqliteRuntime, type StoredPack } from './packStorage.js';
 import { routingStorage } from './routingStorage.js';
 
 // ---------------------------------------------------------------------------
@@ -72,10 +75,30 @@ export interface PackBuildProgress {
 
 let currentPack: RegionPack | null = null;
 let currentPackId: string | null = null;
+let compositeRouter: Router | null = null;
 let nationalRouter: InternalRouter | null = null;
 let nationalRoutingDb: WebDb | null = null;
 let nationalRoutingId: string | null = null;
 let nationalRoutingBbox: [number, number, number, number] | null = null;
+
+async function closeCompositeRouter(): Promise<void> {
+  if (!compositeRouter) return;
+  await compositeRouter.close();
+  compositeRouter = null;
+}
+
+async function rebuildCompositeRouter(country: string): Promise<void> {
+  await closeCompositeRouter();
+  const sources = await packStorage.listRoutingSources(country);
+  if (sources.length < 2) return;
+  try {
+    compositeRouter = await openOpfsCompositeRouter(sources);
+  } catch (error) {
+    // A broken neighbouring pack must not prevent the selected map from
+    // opening. Its own router remains a truthful single-region fallback.
+    console.warn('[openmaps] could not open composite routing graph:', error);
+  }
+}
 
 async function sha256(bytes: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes);
@@ -90,6 +113,7 @@ function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 
 async function verifyStoredPack(pack: StoredPack): Promise<{ ok: true } | { ok: false; problem: string }> {
   if (pack.manifest.schemaVersion === 2) {
+    if (pack.databaseOpfsPath) return { ok: true };
     const file = pack.manifest.files.database!;
     const bytes = pack.database;
     if (!bytes) return { ok: false, problem: 'unified pack is missing its database bytes' };
@@ -122,9 +146,20 @@ async function verifyStoredPack(pack: StoredPack): Promise<{ ok: true } | { ok: 
 async function openStoredPack(stored: StoredPack): Promise<RegionManifest> {
   const verification = await verifyStoredPack(stored);
   if (!verification.ok) throw new Error(`pack '${stored.manifest.id}' failed verification: ${verification.problem}`);
-  if (currentPack) await currentPack.close();
+  await closeCompositeRouter();
+  if (currentPack) {
+    await currentPack.close();
+    currentPack = null;
+    currentPackId = null;
+  }
 
   if (stored.manifest.schemaVersion === 2) {
+    if (stored.databaseOpfsPath) {
+      currentPack = await openOpfsRegionPack(stored.manifest, stored.databaseOpfsPath);
+      currentPackId = stored.manifest.id;
+      await rebuildCompositeRouter(stored.manifest.country);
+      return stored.manifest;
+    }
     if (!stored.database) throw new Error(`unified pack '${stored.manifest.id}' is missing its database bytes`);
     // One connection serves tiles, search and routing. This is the critical
     // difference from a split pack: do not deserialize a country database
@@ -141,6 +176,7 @@ async function openStoredPack(stored: StoredPack): Promise<RegionManifest> {
       async close() { database.close(); },
     };
     currentPackId = stored.manifest.id;
+    await rebuildCompositeRouter(stored.manifest.country);
     return stored.manifest;
   }
   if (!stored.tiles || !stored.geocode) throw new Error(`split pack '${stored.manifest.id}' is missing data bytes`);
@@ -160,6 +196,7 @@ async function openStoredPack(stored: StoredPack): Promise<RegionManifest> {
     },
   };
   currentPackId = stored.manifest.id;
+  await rebuildCompositeRouter(stored.manifest.country);
   return stored.manifest;
 }
 
@@ -201,6 +238,11 @@ export async function loadPackFromDirectory(files: FileList): Promise<RegionMani
   if (manifest.schemaVersion === 1 && !tilesFile) throw new Error('pack folder is missing tiles.mbtiles');
   if (manifest.schemaVersion === 1 && !geocodeFile) throw new Error('pack folder is missing geocode.sqlite');
 
+  if (manifest.schemaVersion === 2 && supportsOpfsSqliteRuntime()) {
+    const stored = await packStorage.installUnifiedFromFile(manifest, databaseFile!);
+    return openStoredPack(stored);
+  }
+  assertManifestFitsWebRuntime(manifest);
   const stored: StoredPack = manifest.schemaVersion === 2
     ? { manifest, database: await databaseFile!.arrayBuffer(), installedAt: new Date().toISOString() }
     : {
@@ -216,6 +258,7 @@ export async function loadPackFromDirectory(files: FileList): Promise<RegionMani
 }
 
 export async function closeCurrentPack(): Promise<void> {
+  await closeCompositeRouter();
   if (currentPack) {
     await currentPack.close();
     currentPack = null;
@@ -230,9 +273,8 @@ export async function getPackStorageEstimate(): Promise<{ usage: number; quota: 
 // ---------------------------------------------------------------------------
 // Remote pack download
 //
-// Packs hosted at `./packs/<id>/{manifest.json,tiles.mbtiles,geocode.sqlite}`
-// can be downloaded and loaded into memory the same way as a folder-picked
-// pack. `packs.json` at `./packs/packs.json` lists what's available.
+// Packs hosted at `./packs/<id>/` can be installed from the catalog. Unified
+// packs stream to OPFS; legacy split packs use the in-memory fallback.
 // ---------------------------------------------------------------------------
 
 export interface RemotePackEntry {
@@ -241,10 +283,22 @@ export interface RemotePackEntry {
   country: string;
   bbox: [number, number, number, number];
   builtAt: string;
-  /** Total bytes across manifest + tiles + geocode files. */
+  /** Total data bytes for the pack (one database for schema v2). */
   totalBytes: number;
   /** Relative URL to the pack folder, e.g. "aalborg/". */
   baseUrl: string;
+}
+
+// Legacy/incompatible browsers retain an in-memory fallback for regional
+// packs. Larger packs require the worker-backed OPFS VFS.
+export const MAX_WEB_IN_MEMORY_PACK_BYTES = 1024 * 1024 * 1024;
+
+export function getWebPackCompatibilityError(
+  entry: Pick<RemotePackEntry, 'totalBytes'>,
+): string | null {
+  if (entry.totalBytes <= MAX_WEB_IN_MEMORY_PACK_BYTES) return null;
+  if (supportsOpfsSqliteRuntime()) return null;
+  return 'This large map needs a current browser with OPFS and cross-origin isolation (SharedArrayBuffer). Try current Chrome/Edge, or use the desktop app.';
 }
 
 export interface RemotePackIndex {
@@ -337,6 +391,7 @@ export interface PackDownloadProgress {
 export async function loadPackFromUrl(
   baseUrl: string,
   onProgress?: (p: PackDownloadProgress) => void,
+  openAfterDownload = true,
 ): Promise<RegionManifest> {
   const base = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
 
@@ -361,7 +416,21 @@ export async function loadPackFromUrl(
   const v = encodeURIComponent(manifest.builtAt);
 
   if (manifest.schemaVersion === 2) {
-    const databaseBytes = await fetchWithProgress(`${base}${manifest.files.database!.path}?v=${v}`, (received, total) => {
+    // This URL is handed to a Worker. A relative URL would be resolved
+    // against the emitted worker script under /assets/, not against the page,
+    // producing /assets/packs/... and a misleading 404.
+    const databaseUrl = new URL(
+      `${base}${manifest.files.database!.path}?v=${v}`,
+      globalThis.location.href,
+    ).href;
+    if (supportsOpfsSqliteRuntime()) {
+      const stored = await packStorage.installUnifiedFromUrl(manifest, databaseUrl, ({ bytesReceived, bytesTotal }) => {
+        onProgress?.({ step: 'database', bytesReceived, bytesTotal });
+      });
+      return openAfterDownload ? openStoredPack(stored) : stored.manifest;
+    }
+    assertManifestFitsWebRuntime(manifest);
+    const databaseBytes = await fetchWithProgress(databaseUrl, (received, total) => {
       onProgress?.({ step: 'database', bytesReceived: received, bytesTotal: total });
     });
     const stored: StoredPack = {
@@ -372,7 +441,7 @@ export async function loadPackFromUrl(
     const verification = await verifyStoredPack(stored);
     if (!verification.ok) throw new Error(`downloaded pack failed verification: ${verification.problem}`);
     await packStorage.put(stored);
-    return openStoredPack(stored);
+    return openAfterDownload ? openStoredPack(stored) : stored.manifest;
   }
 
   const tilesBytes = await fetchWithProgress(`${base}${manifest.files.tiles.path}?v=${v}`, (received, total) => {
@@ -391,7 +460,7 @@ export async function loadPackFromUrl(
   const verification = await verifyStoredPack(stored);
   if (!verification.ok) throw new Error(`downloaded pack failed verification: ${verification.problem}`);
   await packStorage.put(stored);
-  return openStoredPack(stored);
+  return openAfterDownload ? openStoredPack(stored) : stored.manifest;
 }
 
 /**
@@ -433,6 +502,14 @@ async function fetchWithProgress(
     offset += c.byteLength;
   }
   return out;
+}
+
+function assertManifestFitsWebRuntime(manifest: RegionManifest): void {
+  const residentBytes = manifest.schemaVersion === 2
+    ? manifest.files.database!.bytes
+    : manifest.files.tiles.bytes + manifest.files.geocode.bytes;
+  const incompatibility = getWebPackCompatibilityError({ totalBytes: residentBytes });
+  if (incompatibility) throw new Error(incompatibility);
 }
 
 // ---------------------------------------------------------------------------
@@ -498,11 +575,15 @@ export const api: OpenMapsApi = {
     async verify(packId) {
       const stored = await packStorage.get(packId);
       if (!stored) return { ok: false, problem: `pack '${packId}' is not installed` };
+      if (stored.databaseOpfsPath) return packStorage.verify(packId);
       return verifyStoredPack(stored);
     },
     async uninstall(packId) {
+      const currentCountry = currentPack?.manifest.country ?? null;
       if (currentPackId === packId) await closeCurrentPack();
+      else await closeCompositeRouter();
       await packStorage.remove(packId);
+      if (currentPack && currentCountry) await rebuildCompositeRouter(currentCountry);
     },
   },
   tiles: {
@@ -527,6 +608,7 @@ export const api: OpenMapsApi = {
       if (profile === 'car' && nationalRouter && routingBbox && waypoints.every((p) => insideBbox(p, routingBbox))) {
         return nationalRouter.route({ waypoints, profile });
       }
+      if (compositeRouter) return compositeRouter.route({ waypoints, profile });
       return requirePack().router.route({ waypoints, profile });
     },
   },

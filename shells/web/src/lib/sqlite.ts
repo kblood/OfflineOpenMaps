@@ -4,9 +4,9 @@
 // copy. Each prepared statement is reset + rebound on every call so it
 // behaves like node:sqlite's `StatementSync`.
 //
-// MVP scope: pack files arrive as `Uint8Array` (from a file picker or
-// fetch), and we deserialize into an in-memory SQLite via
-// `sqlite3_deserialize`. OPFS-backed persistence is a future step.
+// Small packs can be deserialized in memory. Country-scale unified packs are
+// opened from OPFS in a dedicated worker, where sqlite-wasm's OPFS VFS is
+// available without copying the complete database into the JS heap.
 import sqlite3InitModule, {
   type Database,
   type PreparedStatement,
@@ -115,4 +115,13 @@ export async function openSqliteFromBytes(bytes: Uint8Array): Promise<WebDb> {
     throw new Error(`sqlite3_deserialize failed: rc=${rc}`);
   }
   return new WebDb(db);
+}
+
+/** Open an existing OPFS database read-only. Must be called from a Worker. */
+export async function openSqliteFromOpfs(path: string): Promise<WebDb> {
+  const sqlite3 = await getSqlite3();
+  if (!sqlite3.oo1.OpfsDb) {
+    throw new Error('sqlite-wasm OPFS VFS is unavailable; check browser support and COOP/COEP headers');
+  }
+  return new WebDb(new sqlite3.oo1.OpfsDb(path, 'r'));
 }

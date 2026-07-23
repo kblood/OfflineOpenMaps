@@ -78,6 +78,15 @@ describe('validateManifest', () => {
     expect(() => validateManifest(bad)).toThrow(/sha256/);
   });
 
+  it.each(['../outside.sqlite', '/absolute.sqlite', 'C:/absolute.sqlite', 'nested\\file.sqlite'])(
+    'rejects unsafe pack file path %s',
+    (path) => {
+      const bad = JSON.parse(JSON.stringify(validManifest));
+      bad.files.tiles.path = path;
+      expect(() => validateManifest(bad)).toThrow(/safe relative path/);
+    },
+  );
+
   it('rejects missing selfTestAnchors', () => {
     const bad = JSON.parse(JSON.stringify(validManifest));
     delete bad.selfTestAnchors;
