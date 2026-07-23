@@ -18,9 +18,8 @@
 # MIME types Apache may not know by default.
 #   .wasm    — sqlite-wasm runtime
 #   .pbf     — MapLibre glyph protobuf-tile files (one per font range)
-#   .mbtiles — SQLite vector tile container (only needed if you ever
-#              host packs on the server; MVP loads from the user's disk)
-#   .sqlite  — pack geocode db (same caveat as .mbtiles)
+#   .mbtiles — SQLite vector tile container for hosted split packs
+#   .sqlite  — hosted geocode or unified country database
 AddType application/wasm        .wasm
 AddType application/x-protobuf  .pbf
 AddType application/vnd.sqlite3 .mbtiles

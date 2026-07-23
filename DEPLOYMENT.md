@@ -96,10 +96,9 @@ Reversible: `sudo a2disconf openmaps && sudo systemctl reload apache2`.
   filenames are safe to cache aggressively).
 - MIME types Apache may not know: `.wasm`, `.pbf` (glyph), `.mbtiles`,
   `.sqlite`.
-- COOP/COEP headers are present but **commented out**. Enable them only
-  when the web shell starts using OPFS sync-access or SharedArrayBuffer.
-  MVP doesn't need them — sqlite-wasm's in-memory deserialize path works
-  without isolation.
+- COOP/COEP headers are enabled. They are required for `SharedArrayBuffer`,
+  which sqlite-wasm's worker-hosted OPFS VFS uses for country-scale packs.
+  Keep these headers on HTML, JavaScript, workers, and WASM responses.
 
 `scripts/release.ps1` is `shells/electron/`-aware-but-doesn't-deploy
 it. The Electron app is shipped as a Windows portable EXE via a
@@ -150,6 +149,33 @@ the 28 unchanged map packs:
 .\scripts\publish-packs.ps1 -SkipPacks
 ```
 
+## Unified Denmark pack
+
+The regional packs can also be merged into one schema-v2 SQLite database:
+
+```powershell
+node scripts/build-denmark-unified.mjs
+node scripts/verify-pack.mjs denmark
+.\scripts\publish-packs.ps1 -OnlyPack denmark -DryRun
+.\scripts\publish-packs.ps1 -OnlyPack denmark
+```
+
+The builder writes to a staging directory and only replaces the previous
+verified `packs/denmark/` after the database and manifest are complete. The
+publisher uses content-addressed remote staging, resumable SFTP transfers,
+remote size/SHA-256 verification, bounded SSH commands, and an atomic live
+swap. Re-running the same command resumes an interrupted large-file upload.
+`-OnlyPack` does not re-upload the separate routing bundle unless
+`-PublishRouting` is explicitly included.
+
+The web runtime streams schema-v2 SQLite packs directly into content-addressed
+OPFS storage, verifies SHA-256 incrementally, and opens them read-only through
+sqlite-wasm's OPFS VFS in a dedicated worker. Interrupted hosted downloads are
+resumed with HTTP Range requests. The 5+ GiB unified Denmark pack therefore
+does not need a matching multi-gigabyte JavaScript heap allocation. Browsers
+without OPFS, workers, `SharedArrayBuffer`, or cross-origin isolation keep the
+in-memory regional-pack fallback and reject packs above 1 GiB before download.
+
 ## Project-by-project mapping
 
 | Shell | Build cmd | Deploy URL |
@@ -159,15 +185,16 @@ the 28 unchanged map packs:
 
 ## Known constraints
 
-- **Pack installation prefers OPFS.** The web shell downloads packs hosted
-  under `/openmaps/packs/`, checksum-verifies them, and stores their files in
-  OPFS where the browser supports it (IndexedDB is the fallback). It still
-  deserializes SQLite into memory while a pack is open; direct SQLite OPFS-VFS
-  access needs a worker-based runtime and is the next performance upgrade.
+- **Country packs require modern OPFS support.** The web shell downloads packs
+  hosted under `/openmaps/packs/`, checksum-verifies them, stores schema-v2
+  files in OPFS, and keeps only the manifest/index in IndexedDB. SQLite access,
+  tile reads, search, reverse lookup, parcel lookup, and routing all run in a
+  dedicated worker. Small/legacy split packs retain an IndexedDB/in-memory
+  fallback for browsers that cannot run the OPFS VFS.
 - **CORS for cross-origin pack hosting.** If you ever host packs on a
   different origin than the shell, the pack server must send
   `Access-Control-Allow-Origin`. Same-origin hosting (under
   `/openmaps/packs/`) is the simplest path.
-- **HTTPS only.** Same reason as IWSDK — the File System Access API
-  (future OPFS work) only ships in secure contexts. The cloud server's
+- **HTTPS only.** OPFS and the required isolation features are secure-context
+  browser APIs. The cloud server's
   TLS cert is what the browser sees.

@@ -39,22 +39,41 @@ the regional packs, so all three profiles work across the full country. There
 is no route stitching at regional boundaries and no separate national
 "backbone" is required for a unified pack.
 
+### Regional composite routing
+
+The desktop and modern web runtimes can also route over the installed regional
+packs without installing the unified country database. `CompositeRouter` opens
+the routing SQLite file from every installed pack in the active pack's country
+and exposes them as one logical graph. Regional packs built from the same OSM
+source retain their global OSM node ids, so an id present in two overlapping
+packs is the exact junction between them. Local `edges.id` values are never
+treated as global identities.
+
+The router does not connect regions by coordinate proximity. If the installed
+packs do not contain a continuous chain of shared nodes, routing returns
+`no-route`. The map and geocoder still use the actively selected pack. On the
+web, the composite router runs in a worker and opens each regional database
+directly through the OPFS VFS, so installing all 28 regions does not copy every
+routing graph into the UI's JavaScript heap. A catalog-driven
+`missing-regions` response remains follow-up work.
+
 ## Runtime and migration
 
-Desktop opens `openmaps.sqlite` directly from disk and is the supported
-runtime for a country-sized pack today. Existing schema-v1 split packs remain
-valid and can coexist with schema-v2 packs.
+Desktop opens `openmaps.sqlite` directly from disk. Existing schema-v1 split
+packs remain valid and can coexist with schema-v2 packs.
 
-The web installer recognises schema-v2 packs and opens one SQLite connection
-shared by the map, search and router; it no longer deserializes the country
-database twice. The current sqlite-wasm adapter still deserializes an opened
-database into memory, so a multi-gigabyte Denmark pack must **not** be
-published for browser installation until the next migration is complete:
+The web installer streams schema-v2 databases into content-addressed OPFS
+storage and hashes each chunk as it arrives. Hosted transfers resume with an
+HTTP Range request after an interruption. Only a successfully size- and
+SHA-256-verified file is registered as installed; the prior installed version
+is retained until that point.
 
-1. download `openmaps.sqlite` directly into SQLite's worker-based OPFS VFS;
-2. checksum it incrementally while streaming, rather than retaining chunks;
-3. open the same OPFS-backed database from a worker, keeping map reads,
-   search and routing off the UI thread.
-
-This is a storage/runtime change only. The country database schema and the
-manifest introduced here are deliberately the stable input to that migration.
+The browser opens the same database read-only through sqlite-wasm's OPFS VFS
+inside a dedicated worker. Tile reads, search, reverse geocoding, parcel lookup,
+and routing stay off the UI thread and the complete database is never copied
+into the JavaScript heap. This path requires a secure, cross-origin-isolated
+page plus OPFS, Web Workers, and `SharedArrayBuffer`. Browsers lacking those
+features can still use small schema-v1 packs through the in-memory fallback,
+but cannot combine several graphs. The Denmark catalog collection installs its
+28 regional members serially, skips members already present, and opens the
+composite graph when installation completes.

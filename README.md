@@ -110,17 +110,23 @@ should show four green dots and the message **"✓ Fully offline."**
 
 ## What v2 still needs
 
-Country-scale web installation is tracked in [COUNTRY_PACKS.md](./COUNTRY_PACKS.md).
-The builder can now create one SQLite database for a country; browser loading
-still needs the documented OPFS-VFS migration before a multi-gigabyte pack is
-published to the web catalog.
+Country-scale publishing is documented in [COUNTRY_PACKS.md](./COUNTRY_PACKS.md).
+The builder creates one SQLite database for a country. The web shell streams
+schema-v2 databases into OPFS, verifies them incrementally, and serves tiles,
+search, parcel lookup, and routing from worker-hosted sqlite-wasm without
+loading the complete multi-gigabyte file into JavaScript memory.
+
+As a smaller-download alternative, the Denmark catalog is also a collection of
+28 independent regional packs. Users can install only the regions they need or
+download the complete collection. Desktop and modern browsers route across the
+installed members as one graph by joining their shared global OSM node ids.
 
 ### Nice-to-haves
 
 1. **Better road labelling at low zoom**, more map style polish.
-2. **Optional URL-based pack install**. Today the UI has "Install from
-   folder…"; a follow-up could add a "fetch by URL" path that downloads a
-   zip and unpacks it (a one-shot online action; runtime stays offline).
+2. **Pause/resume controls in the download UI.** Hosted schema-v2 transfers
+   already resume from durable OPFS chunks after an interruption, but the UI
+   does not yet expose explicit pause and cancel actions.
 3. **Multipolygon / turn-restriction relations**. Currently relations are
    ignored on ingest, so one-way nuances driven by `<relation type=restriction>`
    aren't honored. Adding them improves real-world routing quality.
