@@ -53,6 +53,17 @@ network-severed.
 Routing engine is behind a `Router` interface; BRouter (Java sidecar) or
 Valhalla can drop in later without UI changes.
 
+## Use OpenMaps inside another app
+
+`@openmaps/core` now exports a platform-neutral `OpenMapsClient`. It presents
+pack discovery and lifecycle, tiles, search, reverse geocoding, parcels,
+routing, and the offline self-test through one stable object. Node and Electron
+hosts can create it directly with `createNodeOpenMaps()` from
+`@openmaps/platform-node`; other hosts provide a `PackStorage` adapter.
+
+See [INTEGRATION.md](./INTEGRATION.md) for a complete Node example, lifecycle
+events, custom browser/mobile storage guidance, and renderer integration notes.
+
 ## Repo layout
 
 ```
