@@ -16,7 +16,7 @@ import type { RegionManifest } from '@openmaps/core';
  *     renders, not even the `background` layer.
  *   - Any `symbol` layer with `icon-image` REQUIRES a `sprite` URL.
  *   - `source-layer` values must match what the MVT actually contains
- *     (we emit `water`, `roads`, and `places`).
+ *     (we emit `water`, `buildings`, `roads`, and `places`).
  *
  * The associated unit test guarantees these rules at build time.
  */

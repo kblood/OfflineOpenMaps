@@ -87,9 +87,9 @@ describe('buildMapStyle', () => {
     }
   });
 
-  it('only references source-layers that exist in our MVT (water, roads, places)', () => {
+  it('only references source-layers that exist in our MVT', () => {
     const style = buildMapStyle(fakeManifest);
-    const validSourceLayers = new Set(['water', 'roads', 'places']);
+    const validSourceLayers = new Set(['water', 'buildings', 'roads', 'places']);
     for (const l of style.layers ?? []) {
       if ('source-layer' in l && typeof l['source-layer'] === 'string') {
         expect(
@@ -113,11 +113,13 @@ describe('buildMapStyle', () => {
 
   it('honours layer toggles by setting layout.visibility', () => {
     const style = buildMapStyle(fakeManifest, {
-      toggles: { water: false, roadLabels: false, places: false, cyclePaths: false, footPaths: false },
+      toggles: { water: false, buildings: false, roadLabels: false, places: false, cyclePaths: false, footPaths: false },
     });
     const get = (id: string): string | undefined =>
       (style.layers?.find((l) => l.id === id) as { layout?: { visibility?: string } } | undefined)?.layout?.visibility;
     expect(get('water')).toBe('none');
+    expect(get('buildings-fill')).toBe('none');
+    expect(get('buildings-outline')).toBe('none');
     expect(get('road-labels')).toBe('none');
     expect(get('places')).toBe('none');
     expect(get('paths-cycle')).toBe('none');
