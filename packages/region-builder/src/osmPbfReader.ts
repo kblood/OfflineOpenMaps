@@ -64,8 +64,11 @@ export async function readOsmPbf(path: string, opts: OsmPbfReadOpts = {}): Promi
   const nodes: RawOsmNode[] = [];
   const ways: RawOsmWay[] = [];
   const relations: RawOsmRelation[] = [];
-  const keptNodeIds = new Set<number>();
   const clip = opts.clipBbox;
+  // The membership set is only needed to discard ways outside a clipped
+  // extract. Keeping it for an un-clipped country file duplicates millions
+  // of node IDs and hits V8's Set-size limit before parsing can finish.
+  const keptNodeIds = clip ? new Set<number>() : null;
   const interval = opts.progressInterval ?? 100_000;
 
   let seen = 0;
@@ -80,7 +83,7 @@ export async function readOsmPbf(path: string, opts: OsmPbfReadOpts = {}): Promi
         lon: n.lon,
         tags: tagMap(n.tags),
       });
-      keptNodeIds.add(n.id);
+      keptNodeIds?.add(n.id);
       seen += 1;
       if (opts.onProgress && seen % interval === 0) {
         opts.onProgress({ nodes: nodes.length, ways: ways.length });
@@ -93,7 +96,7 @@ export async function readOsmPbf(path: string, opts: OsmPbfReadOpts = {}): Promi
       if (clip) {
         let any = false;
         for (const ref of w.refs) {
-          if (keptNodeIds.has(ref)) {
+          if (keptNodeIds?.has(ref)) {
             any = true;
             break;
           }

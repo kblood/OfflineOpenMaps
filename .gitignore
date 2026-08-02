@@ -17,6 +17,12 @@ packs/
 # Real-OSM test fixtures (multi-MB) — fetched on demand, not committed.
 packages/region-builder/tests/fixtures/real/
 
+# Downloaded country extracts and build logs are regenerated locally.
+data/
+
+# Generated national-routing companions are published separately.
+routing/
+
 # Editor
 .vscode/
 .idea/

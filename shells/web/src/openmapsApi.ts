@@ -3,12 +3,12 @@
 // In Electron, the renderer talks to the main process over IPC via a
 // `window.openmaps.*` bridge. In the browser, every adapter (tile source,
 // geocode index, router) runs in-process against sqlite-wasm, so we
-// expose the same `api` object as a plain module-level singleton.
+// expose the same `api` object as a plain module-level singleton. Small legacy
+// packs run in memory; unified packs use SQLite's OPFS VFS in a Worker.
 //
-// MVP scope:
-//   - pack files are loaded from a user-selected directory (webkitdirectory),
-//     not OPFS — `packs.list()` returns at most one entry, the currently
-//     loaded pack.
+// Browser-specific scope:
+//   - pack files can be loaded from the hosted catalog or a user-selected
+//     directory; installations are indexed in IndexedDB and prefer OPFS.
 //   - in-app pack builder (Geofabrik / Overpass) is NOT available because
 //     both endpoints CORS-block browsers.
 //   - `offline.set` is a no-op; a service worker enforcement step is a
@@ -25,6 +25,7 @@ import type {
   SearchResult,
   ReverseResult,
   RouteResult,
+  Router,
   Profile,
   TileBytes,
   SelfTestReport,
@@ -34,6 +35,10 @@ import { openSqliteFromBytes, type WebDb } from './lib/sqlite.js';
 import { MbtilesTileSource } from './lib/MbtilesTileSource.js';
 import { WebGeocodeIndex } from './lib/GeocodeIndex.js';
 import { InternalRouter } from './lib/InternalRouter.js';
+import { openOpfsRegionPack } from './lib/OpfsRegionPack.js';
+import { openOpfsCompositeRouter } from './lib/OpfsCompositeRouter.js';
+import { packStorage, supportsOpfsSqliteRuntime, type StoredPack } from './packStorage.js';
+import { routingStorage } from './routingStorage.js';
 
 // ---------------------------------------------------------------------------
 // Pack types mirrored from the electron preload for UI compatibility. The
@@ -70,6 +75,130 @@ export interface PackBuildProgress {
 
 let currentPack: RegionPack | null = null;
 let currentPackId: string | null = null;
+let compositeRouter: Router | null = null;
+let nationalRouter: InternalRouter | null = null;
+let nationalRoutingDb: WebDb | null = null;
+let nationalRoutingId: string | null = null;
+let nationalRoutingBbox: [number, number, number, number] | null = null;
+
+async function closeCompositeRouter(): Promise<void> {
+  if (!compositeRouter) return;
+  await compositeRouter.close();
+  compositeRouter = null;
+}
+
+async function rebuildCompositeRouter(country: string): Promise<void> {
+  await closeCompositeRouter();
+  const sources = await packStorage.listRoutingSources(country);
+  if (sources.length < 2) return;
+  try {
+    compositeRouter = await openOpfsCompositeRouter(sources);
+  } catch (error) {
+    // A broken neighbouring pack must not prevent the selected map from
+    // opening. Its own router remains a truthful single-region fallback.
+    console.warn('[openmaps] could not open composite routing graph:', error);
+  }
+}
+
+async function sha256(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function copyToArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return copy.buffer;
+}
+
+async function verifyStoredPack(pack: StoredPack): Promise<{ ok: true } | { ok: false; problem: string }> {
+  if (pack.manifest.schemaVersion === 2) {
+    if (pack.databaseOpfsPath) return { ok: true };
+    const file = pack.manifest.files.database!;
+    const bytes = pack.database;
+    if (!bytes) return { ok: false, problem: 'unified pack is missing its database bytes' };
+    if (bytes.byteLength !== file.bytes) {
+      return { ok: false, problem: `database size mismatch: expected ${file.bytes}, got ${bytes.byteLength}` };
+    }
+    if ((await sha256(bytes)) !== file.sha256) return { ok: false, problem: 'database sha256 mismatch' };
+    return { ok: true };
+  }
+  if (pack.manifest.files.routing.path !== pack.manifest.files.geocode.path) {
+    return {
+      ok: false,
+      problem: 'web packs with a separate routing file are not supported yet',
+    };
+  }
+  const files = [
+    ['tiles', pack.manifest.files.tiles, pack.tiles],
+    ['geocode', pack.manifest.files.geocode, pack.geocode],
+  ] as const;
+  for (const [name, file, bytes] of files) {
+    if (!bytes) return { ok: false, problem: `${name} bytes missing` };
+    if (bytes.byteLength !== file.bytes) {
+      return { ok: false, problem: `${name} size mismatch: expected ${file.bytes}, got ${bytes.byteLength}` };
+    }
+    if ((await sha256(bytes)) !== file.sha256) return { ok: false, problem: `${name} sha256 mismatch` };
+  }
+  return { ok: true };
+}
+
+async function openStoredPack(stored: StoredPack): Promise<RegionManifest> {
+  const verification = await verifyStoredPack(stored);
+  if (!verification.ok) throw new Error(`pack '${stored.manifest.id}' failed verification: ${verification.problem}`);
+  await closeCompositeRouter();
+  if (currentPack) {
+    await currentPack.close();
+    currentPack = null;
+    currentPackId = null;
+  }
+
+  if (stored.manifest.schemaVersion === 2) {
+    if (stored.databaseOpfsPath) {
+      currentPack = await openOpfsRegionPack(stored.manifest, stored.databaseOpfsPath);
+      currentPackId = stored.manifest.id;
+      await rebuildCompositeRouter(stored.manifest.country);
+      return stored.manifest;
+    }
+    if (!stored.database) throw new Error(`unified pack '${stored.manifest.id}' is missing its database bytes`);
+    // One connection serves tiles, search and routing. This is the critical
+    // difference from a split pack: do not deserialize a country database
+    // twice merely because it has two logical consumers.
+    const database = await openSqliteFromBytes(new Uint8Array(stored.database));
+    const tiles = new MbtilesTileSource(database);
+    const geocode = new WebGeocodeIndex(database);
+    const router = new InternalRouter(database);
+    currentPack = {
+      manifest: stored.manifest,
+      tiles,
+      geocode,
+      router,
+      async close() { database.close(); },
+    };
+    currentPackId = stored.manifest.id;
+    await rebuildCompositeRouter(stored.manifest.country);
+    return stored.manifest;
+  }
+  if (!stored.tiles || !stored.geocode) throw new Error(`split pack '${stored.manifest.id}' is missing data bytes`);
+  const tilesDb = await openSqliteFromBytes(new Uint8Array(stored.tiles));
+  const geocodeDb = await openSqliteFromBytes(new Uint8Array(stored.geocode));
+  const tiles = new MbtilesTileSource(tilesDb);
+  const geocode = new WebGeocodeIndex(geocodeDb);
+  const router = new InternalRouter(geocodeDb);
+  currentPack = {
+    manifest: stored.manifest,
+    tiles,
+    geocode,
+    router,
+    async close() {
+      await tiles.close();
+      try { geocodeDb.close(); } catch { /* already closed */ }
+    },
+  };
+  currentPackId = stored.manifest.id;
+  await rebuildCompositeRouter(stored.manifest.country);
+  return stored.manifest;
+}
 
 function requirePack(): RegionPack {
   if (!currentPack) throw new Error('no pack open');
@@ -101,66 +230,51 @@ export async function loadPackFromDirectory(files: FileList): Promise<RegionMani
   const manifestFile = byName.get('manifest.json');
   const tilesFile = byName.get('tiles.mbtiles');
   const geocodeFile = byName.get('geocode.sqlite');
+  const databaseFile = byName.get('openmaps.sqlite');
 
   if (!manifestFile) throw new Error('pack folder is missing manifest.json');
-  if (!tilesFile) throw new Error('pack folder is missing tiles.mbtiles');
-  if (!geocodeFile) throw new Error('pack folder is missing geocode.sqlite');
-
   const manifest = validateManifest(JSON.parse(await manifestFile.text()) as unknown);
+  if (manifest.schemaVersion === 2 && !databaseFile) throw new Error('unified pack folder is missing openmaps.sqlite');
+  if (manifest.schemaVersion === 1 && !tilesFile) throw new Error('pack folder is missing tiles.mbtiles');
+  if (manifest.schemaVersion === 1 && !geocodeFile) throw new Error('pack folder is missing geocode.sqlite');
 
-  // Close any previously-open pack before loading the new one.
-  if (currentPack) {
-    await currentPack.close();
-    currentPack = null;
-    currentPackId = null;
+  if (manifest.schemaVersion === 2 && supportsOpfsSqliteRuntime()) {
+    const stored = await packStorage.installUnifiedFromFile(manifest, databaseFile!);
+    return openStoredPack(stored);
   }
-
-  const tilesBytes = new Uint8Array(await tilesFile.arrayBuffer());
-  const geocodeBytes = new Uint8Array(await geocodeFile.arrayBuffer());
-
-  const tilesDb = await openSqliteFromBytes(tilesBytes);
-  const geocodeDb = await openSqliteFromBytes(geocodeBytes);
-
-  const tiles = new MbtilesTileSource(tilesDb);
-  const geocode = new WebGeocodeIndex(geocodeDb);
-  const router = new InternalRouter(geocodeDb);
-
-  const pack: RegionPack = {
-    manifest,
-    tiles,
-    geocode,
-    router,
-    async close() {
-      await tiles.close();
-      // tiles.close() also closes the tiles db; geocode db is shared with
-      // the router so we close it directly here.
-      try {
-        geocodeDb.close();
-      } catch {
-        // already closed
-      }
-    },
-  };
-
-  currentPack = pack;
-  currentPackId = manifest.id;
-  return manifest;
+  assertManifestFitsWebRuntime(manifest);
+  const stored: StoredPack = manifest.schemaVersion === 2
+    ? { manifest, database: await databaseFile!.arrayBuffer(), installedAt: new Date().toISOString() }
+    : {
+        manifest,
+        tiles: await tilesFile!.arrayBuffer(),
+        geocode: await geocodeFile!.arrayBuffer(),
+        installedAt: new Date().toISOString(),
+      };
+  const verification = await verifyStoredPack(stored);
+  if (!verification.ok) throw new Error(`pack failed verification: ${verification.problem}`);
+  await packStorage.put(stored);
+  return openStoredPack(stored);
 }
 
 export async function closeCurrentPack(): Promise<void> {
+  await closeCompositeRouter();
   if (currentPack) {
     await currentPack.close();
     currentPack = null;
     currentPackId = null;
   }
+}
+
+export async function getPackStorageEstimate(): Promise<{ usage: number; quota: number } | null> {
+  return packStorage.estimate();
 }
 
 // ---------------------------------------------------------------------------
 // Remote pack download
 //
-// Packs hosted at `./packs/<id>/{manifest.json,tiles.mbtiles,geocode.sqlite}`
-// can be downloaded and loaded into memory the same way as a folder-picked
-// pack. `packs.json` at `./packs/packs.json` lists what's available.
+// Packs hosted at `./packs/<id>/` can be installed from the catalog. Unified
+// packs stream to OPFS; legacy split packs use the in-memory fallback.
 // ---------------------------------------------------------------------------
 
 export interface RemotePackEntry {
@@ -169,32 +283,97 @@ export interface RemotePackEntry {
   country: string;
   bbox: [number, number, number, number];
   builtAt: string;
-  /** Total bytes across manifest + tiles + geocode files. */
+  /** Total data bytes for the pack (one database for schema v2). */
   totalBytes: number;
   /** Relative URL to the pack folder, e.g. "aalborg/". */
   baseUrl: string;
 }
 
+// Legacy/incompatible browsers retain an in-memory fallback for regional
+// packs. Larger packs require the worker-backed OPFS VFS.
+export const MAX_WEB_IN_MEMORY_PACK_BYTES = 1024 * 1024 * 1024;
+
+export function getWebPackCompatibilityError(
+  entry: Pick<RemotePackEntry, 'totalBytes'>,
+): string | null {
+  if (entry.totalBytes <= MAX_WEB_IN_MEMORY_PACK_BYTES) return null;
+  if (supportsOpfsSqliteRuntime()) return null;
+  return 'This large map needs a current browser with OPFS and cross-origin isolation (SharedArrayBuffer). Try current Chrome/Edge, or use the desktop app.';
+}
+
 export interface RemotePackIndex {
   packs: RemotePackEntry[];
+  collections?: RemotePackCollection[];
+  routingBundles?: RemoteRoutingBundle[];
+}
+
+/** A separately downloadable country graph, never a map pack. */
+export interface RemoteRoutingBundle {
+  id: string;
+  name: string;
+  country: string;
+  bbox: [number, number, number, number];
+  baseUrl: string;
+  file: { path: string; bytes: number; sha256: string };
+  profiles: Profile[];
+  description: string;
+}
+
+/** A country-sized download composed of independently usable regional packs. */
+export interface RemotePackCollection {
+  id: string;
+  name: string;
+  country: string;
+  bbox: [number, number, number, number];
+  description: string;
+  members: string[];
+}
+
+export interface RemoteCatalog {
+  packs: RemotePackEntry[];
+  collections: RemotePackCollection[];
+  routingBundles: RemoteRoutingBundle[];
 }
 
 export async function fetchAvailablePacks(
   indexUrl = './packs/packs.json',
-): Promise<RemotePackEntry[]> {
+): Promise<RemoteCatalog> {
   const res = await fetch(indexUrl, { cache: 'no-cache' });
   if (!res.ok) {
     // 404 just means no packs are hosted yet — return empty rather than
     // forcing every caller to handle the error.
-    if (res.status === 404) return [];
+    if (res.status === 404) return { packs: [], collections: [], routingBundles: [] };
     throw new Error(`pack index ${indexUrl} returned ${res.status}`);
   }
   const data = (await res.json()) as RemotePackIndex;
-  return Array.isArray(data.packs) ? data.packs : [];
+  return {
+    packs: Array.isArray(data.packs) ? data.packs : [],
+    collections: Array.isArray(data.collections) ? data.collections : [],
+    routingBundles: Array.isArray(data.routingBundles) ? data.routingBundles : [],
+  };
+}
+
+export interface RoutingDownloadProgress { bytesReceived: number; bytesTotal: number; }
+
+async function openNationalRouting(id: string, bytes: ArrayBuffer, bbox?: [number, number, number, number]): Promise<void> {
+  if (nationalRoutingDb) try { nationalRoutingDb.close(); } catch { /* already closed */ }
+  nationalRoutingDb = await openSqliteFromBytes(new Uint8Array(bytes));
+  nationalRouter = new InternalRouter(nationalRoutingDb);
+  nationalRoutingId = id;
+  nationalRoutingBbox = bbox ?? nationalRoutingBbox;
+}
+
+async function installNationalRouting(entry: RemoteRoutingBundle, onProgress?: (p: RoutingDownloadProgress) => void): Promise<void> {
+  const bytes = await fetchWithProgress(`./packs/${entry.baseUrl}${entry.file.path}`, (bytesReceived, bytesTotal) => onProgress?.({ bytesReceived, bytesTotal }));
+  const buffer = copyToArrayBuffer(bytes);
+  if (buffer.byteLength !== entry.file.bytes) throw new Error(`national routing size mismatch: expected ${entry.file.bytes}, got ${buffer.byteLength}`);
+  if ((await sha256(buffer)) !== entry.file.sha256) throw new Error('national routing sha256 mismatch');
+  await routingStorage.put({ id: entry.id, bytes: buffer, installedAt: new Date().toISOString(), bbox: entry.bbox });
+  await openNationalRouting(entry.id, buffer, entry.bbox);
 }
 
 export interface PackDownloadProgress {
-  step: 'manifest' | 'tiles' | 'geocode';
+  step: 'manifest' | 'tiles' | 'geocode' | 'database';
   bytesReceived: number;
   /** 0 if Content-Length wasn't sent. */
   bytesTotal: number;
@@ -212,6 +391,7 @@ export interface PackDownloadProgress {
 export async function loadPackFromUrl(
   baseUrl: string,
   onProgress?: (p: PackDownloadProgress) => void,
+  openAfterDownload = true,
 ): Promise<RegionManifest> {
   const base = baseUrl.endsWith('/') ? baseUrl : baseUrl + '/';
 
@@ -235,44 +415,52 @@ export async function loadPackFromUrl(
   // hand back a stale body via a misconfigured proxy or service worker.
   const v = encodeURIComponent(manifest.builtAt);
 
-  const tilesBytes = await fetchWithProgress(`${base}tiles.mbtiles?v=${v}`, (received, total) => {
+  if (manifest.schemaVersion === 2) {
+    // This URL is handed to a Worker. A relative URL would be resolved
+    // against the emitted worker script under /assets/, not against the page,
+    // producing /assets/packs/... and a misleading 404.
+    const databaseUrl = new URL(
+      `${base}${manifest.files.database!.path}?v=${v}`,
+      globalThis.location.href,
+    ).href;
+    if (supportsOpfsSqliteRuntime()) {
+      const stored = await packStorage.installUnifiedFromUrl(manifest, databaseUrl, ({ bytesReceived, bytesTotal }) => {
+        onProgress?.({ step: 'database', bytesReceived, bytesTotal });
+      });
+      return openAfterDownload ? openStoredPack(stored) : stored.manifest;
+    }
+    assertManifestFitsWebRuntime(manifest);
+    const databaseBytes = await fetchWithProgress(databaseUrl, (received, total) => {
+      onProgress?.({ step: 'database', bytesReceived: received, bytesTotal: total });
+    });
+    const stored: StoredPack = {
+      manifest,
+      database: copyToArrayBuffer(databaseBytes),
+      installedAt: new Date().toISOString(),
+    };
+    const verification = await verifyStoredPack(stored);
+    if (!verification.ok) throw new Error(`downloaded pack failed verification: ${verification.problem}`);
+    await packStorage.put(stored);
+    return openAfterDownload ? openStoredPack(stored) : stored.manifest;
+  }
+
+  const tilesBytes = await fetchWithProgress(`${base}${manifest.files.tiles.path}?v=${v}`, (received, total) => {
     onProgress?.({ step: 'tiles', bytesReceived: received, bytesTotal: total });
   });
-  const geocodeBytes = await fetchWithProgress(`${base}geocode.sqlite?v=${v}`, (received, total) => {
+  const geocodeBytes = await fetchWithProgress(`${base}${manifest.files.geocode.path}?v=${v}`, (received, total) => {
     onProgress?.({ step: 'geocode', bytesReceived: received, bytesTotal: total });
   });
 
-  if (currentPack) {
-    await currentPack.close();
-    currentPack = null;
-    currentPackId = null;
-  }
-
-  const tilesDb = await openSqliteFromBytes(tilesBytes);
-  const geocodeDb = await openSqliteFromBytes(geocodeBytes);
-
-  const tiles = new MbtilesTileSource(tilesDb);
-  const geocode = new WebGeocodeIndex(geocodeDb);
-  const router = new InternalRouter(geocodeDb);
-
-  const pack: RegionPack = {
+  const stored: StoredPack = {
     manifest,
-    tiles,
-    geocode,
-    router,
-    async close() {
-      await tiles.close();
-      try {
-        geocodeDb.close();
-      } catch {
-        // already closed
-      }
-    },
+    tiles: copyToArrayBuffer(tilesBytes),
+    geocode: copyToArrayBuffer(geocodeBytes),
+    installedAt: new Date().toISOString(),
   };
-
-  currentPack = pack;
-  currentPackId = manifest.id;
-  return manifest;
+  const verification = await verifyStoredPack(stored);
+  if (!verification.ok) throw new Error(`downloaded pack failed verification: ${verification.problem}`);
+  await packStorage.put(stored);
+  return openAfterDownload ? openStoredPack(stored) : stored.manifest;
 }
 
 /**
@@ -316,6 +504,14 @@ async function fetchWithProgress(
   return out;
 }
 
+function assertManifestFitsWebRuntime(manifest: RegionManifest): void {
+  const residentBytes = manifest.schemaVersion === 2
+    ? manifest.files.database!.bytes
+    : manifest.files.tiles.bytes + manifest.files.geocode.bytes;
+  const incompatibility = getWebPackCompatibilityError({ totalBytes: residentBytes });
+  if (incompatibility) throw new Error(incompatibility);
+}
+
 // ---------------------------------------------------------------------------
 // api: shape-compatible with shells/electron/renderer/openmapsApi.ts so
 // the same React components consume both.
@@ -344,6 +540,13 @@ interface OpenMapsApi {
       profile: Profile,
     ): Promise<RouteResult>;
   };
+  nationalRouting: {
+    list(): Promise<Array<{ id: string; installedAt: string }>>;
+    install(entry: RemoteRoutingBundle, onProgress?: (p: RoutingDownloadProgress) => void): Promise<void>;
+    open(id: string): Promise<void>;
+    current(): Promise<string | null>;
+    uninstall(id: string): Promise<void>;
+  };
   offline: {
     set(offline: boolean): Promise<boolean>;
     get(): Promise<boolean>;
@@ -356,13 +559,12 @@ interface OpenMapsApi {
 export const api: OpenMapsApi = {
   packs: {
     async list() {
-      return currentPack ? [currentPack.manifest] : [];
+      return (await packStorage.list()).map((pack) => pack.manifest);
     },
     async open(packId: string) {
-      if (!currentPack || currentPackId !== packId) {
-        throw new Error(`pack ${packId} is not loaded — pick its folder via the loader`);
-      }
-      return currentPack.manifest;
+      const stored = await packStorage.get(packId);
+      if (!stored) throw new Error(`pack '${packId}' is not installed`);
+      return openStoredPack(stored);
     },
     async close() {
       await closeCurrentPack();
@@ -370,14 +572,18 @@ export const api: OpenMapsApi = {
     async current() {
       return currentPack ? currentPack.manifest : null;
     },
-    async verify() {
-      // MVP: we don't keep the raw bytes around to re-hash. Trust the
-      // pack the user just loaded; verification is a future step that
-      // would happen at load time.
-      return { ok: true };
+    async verify(packId) {
+      const stored = await packStorage.get(packId);
+      if (!stored) return { ok: false, problem: `pack '${packId}' is not installed` };
+      if (stored.databaseOpfsPath) return packStorage.verify(packId);
+      return verifyStoredPack(stored);
     },
-    async uninstall() {
-      await closeCurrentPack();
+    async uninstall(packId) {
+      const currentCountry = currentPack?.manifest.country ?? null;
+      if (currentPackId === packId) await closeCurrentPack();
+      else await closeCompositeRouter();
+      await packStorage.remove(packId);
+      if (currentPack && currentCountry) await rebuildCompositeRouter(currentCountry);
     },
   },
   tiles: {
@@ -398,7 +604,32 @@ export const api: OpenMapsApi = {
   },
   route: {
     async compute(waypoints, profile) {
+      const routingBbox = nationalRoutingBbox;
+      if (profile === 'car' && nationalRouter && routingBbox && waypoints.every((p) => insideBbox(p, routingBbox))) {
+        return nationalRouter.route({ waypoints, profile });
+      }
+      if (compositeRouter) return compositeRouter.route({ waypoints, profile });
       return requirePack().router.route({ waypoints, profile });
+    },
+  },
+  nationalRouting: {
+    async list() { return (await routingStorage.list()).map((entry) => ({ id: entry.id, installedAt: entry.installedAt })); },
+    async install(entry, onProgress) { await installNationalRouting(entry, onProgress); },
+    async open(id) {
+      const stored = await routingStorage.get(id);
+      if (!stored) throw new Error(`national routing '${id}' is not installed`);
+      await openNationalRouting(id, stored.bytes, stored.bbox);
+    },
+    async current() { return nationalRoutingId; },
+    async uninstall(id) {
+      if (nationalRoutingId === id) {
+        if (nationalRoutingDb) try { nationalRoutingDb.close(); } catch { /* already closed */ }
+        nationalRoutingDb = null;
+        nationalRouter = null;
+        nationalRoutingId = null;
+        nationalRoutingBbox = null;
+      }
+      await routingStorage.remove(id);
     },
   },
   offline: {
@@ -418,3 +649,7 @@ export const api: OpenMapsApi = {
     },
   },
 };
+
+function insideBbox(point: { lat: number; lon: number }, bbox: [number, number, number, number]): boolean {
+  return point.lon >= bbox[0] && point.lon <= bbox[2] && point.lat >= bbox[1] && point.lat <= bbox[3];
+}

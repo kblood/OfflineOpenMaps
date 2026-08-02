@@ -1,17 +1,20 @@
 {
   "name": "@openmaps/core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": ["dist"],
   "exports": {
-    ".": "./dist/index.js",
-    "./pack": "./dist/pack/index.js",
-    "./geocode": "./dist/geocode/index.js",
-    "./route": "./dist/route/index.js",
-    "./tiles": "./dist/tiles/index.js",
-    "./selftest": "./dist/selftest/index.js"
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./client": { "types": "./dist/client/index.d.ts", "import": "./dist/client/index.js" },
+    "./pack": { "types": "./dist/pack/index.d.ts", "import": "./dist/pack/index.js" },
+    "./geocode": { "types": "./dist/geocode/index.d.ts", "import": "./dist/geocode/index.js" },
+    "./route": { "types": "./dist/route/index.d.ts", "import": "./dist/route/index.js" },
+    "./tiles": { "types": "./dist/tiles/index.d.ts", "import": "./dist/tiles/index.js" },
+    "./selftest": { "types": "./dist/selftest/index.d.ts", "import": "./dist/selftest/index.js" }
   },
+  "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",

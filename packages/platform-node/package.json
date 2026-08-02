@@ -1,12 +1,14 @@
 {
   "name": "@openmaps/platform-node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": ["dist"],
   "exports": {
-    ".": "./dist/index.js"
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" }
   },
+  "publishConfig": { "access": "public" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
@@ -14,7 +16,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@openmaps/core": "*"
+    "@openmaps/core": "^0.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

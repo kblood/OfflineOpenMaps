@@ -10,8 +10,9 @@ import type { SyntheticData } from './synthetic.js';
  *     forward search must be able to find both.
  *   - reversePoint: pick a node that has at least 2 incident edges, near the
  *     bbox center. That ensures the reverse-geocoder finds an edge nearby.
- *   - routeWaypoints: pick two well-connected nodes in opposite quadrants of
- *     the bbox so the route has to traverse a meaningful portion of the graph.
+ *   - routeWaypoints: use the ends of a real road edge near the bbox centre.
+ *     This proves routing operates on the graph without making a self-test
+ *     Dijkstra traverse an entire country-scale regional pack.
  */
 export function chooseAnchors(data: SyntheticData): {
   searchTerms: string[];
@@ -57,18 +58,78 @@ export function chooseAnchors(data: SyntheticData): {
   const reverseNode = nearest(candidates, cLat, cLon);
   const reversePoint = { lat: reverseNode.lat, lon: reverseNode.lon };
 
-  // Route waypoints: nodes near the SW and NE quadrants. We don't pick the
-  // extreme corners because they're often disconnected dead-ends in OSM.
-  const swTarget = { lat: minLat + (maxLat - minLat) * 0.25, lon: minLon + (maxLon - minLon) * 0.25 };
-  const neTarget = { lat: minLat + (maxLat - minLat) * 0.75, lon: minLon + (maxLon - minLon) * 0.75 };
-  const a = nearest(candidates, swTarget.lat, swTarget.lon);
-  const b = nearest(candidates, neTarget.lat, neTarget.lon);
+  // Find a directly-connected edge near the centre, then walk its connected
+  // component to a nearby-but-distinct node. A very short OSM edge can have
+  // both endpoints snap to the same routing node (the browser deliberately
+  // considers several nearest candidates), which would make the route look
+  // empty even though the graph is sound. Keeping the walk local still makes
+  // the self-test cheap on country-scale regional packs.
+  const nodesById = new Map(data.nodes.map((node) => [node.id, node]));
+  let routeEdge: (typeof data.edges)[number] | undefined;
+  let routeEdgeDistance = Infinity;
+  for (const edge of data.edges) {
+    // The offline self-test routes with the car profile. A path/track can be
+    // perfectly valid map data but cannot prove the car router works.
+    if (!edge.allowsCar) continue;
+    const from = nodesById.get(edge.fromNode);
+    const to = nodesById.get(edge.toNode);
+    if (!from || !to) continue;
+    const midLat = (from.lat + to.lat) / 2;
+    const midLon = (from.lon + to.lon) / 2;
+    const distance = (midLat - cLat) ** 2 + (midLon - cLon) ** 2;
+    if (distance < routeEdgeDistance) {
+      routeEdge = edge;
+      routeEdgeDistance = distance;
+    }
+  }
+  if (!routeEdge) throw new Error('cannot choose route anchors: graph has no complete edges');
+  const a = nodesById.get(routeEdge.fromNode)!;
+  const b = findDistinctReachableNode(a, routeEdge.toNode, data.edges, nodesById);
   const routeWaypoints = [
     { lat: a.lat, lon: a.lon },
     { lat: b.lat, lon: b.lon },
   ];
 
   return { searchTerms, reversePoint, routeWaypoints };
+}
+
+function findDistinctReachableNode(
+  start: { id: number; lat: number; lon: number },
+  firstHopId: number,
+  edges: SyntheticData['edges'],
+  nodesById: ReadonlyMap<number, { id: number; lat: number; lon: number }>,
+): { id: number; lat: number; lon: number } {
+  const neighbours = new Map<number, number[]>();
+  for (const edge of edges) {
+    if (!edge.allowsCar) continue;
+    const list = neighbours.get(edge.fromNode) ?? [];
+    list.push(edge.toNode);
+    neighbours.set(edge.fromNode, list);
+  }
+
+  // Around 200 m in latitude/longitude degrees. This is comfortably beyond
+  // nearest-node ambiguity while remaining a short, reliable graph route.
+  const minSquaredDistance = 0.000_004;
+  const queue = [firstHopId];
+  const visited = new Set<number>([start.id]);
+  let fallback = nodesById.get(firstHopId) ?? start;
+
+  for (let index = 0; index < queue.length && index < 1_000; index += 1) {
+    const id = queue[index]!;
+    if (visited.has(id)) continue;
+    visited.add(id);
+    const node = nodesById.get(id);
+    if (!node) continue;
+    fallback = node;
+    const dLat = node.lat - start.lat;
+    const dLon = node.lon - start.lon;
+    if (dLat * dLat + dLon * dLon >= minSquaredDistance) return node;
+    for (const neighbour of neighbours.get(id) ?? []) {
+      if (!visited.has(neighbour)) queue.push(neighbour);
+    }
+  }
+
+  return fallback;
 }
 
 function nearest(

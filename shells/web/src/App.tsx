@@ -9,8 +9,13 @@ import {
   loadPackFromDirectory,
   loadPackFromUrl,
   fetchAvailablePacks,
+  getWebPackCompatibilityError,
+  getPackStorageEstimate,
   type RemotePackEntry,
+  type RemotePackCollection,
+  type RemoteRoutingBundle,
   type PackDownloadProgress,
+  type RoutingDownloadProgress,
 } from './openmapsApi.js';
 import { DEFAULT_LAYER_TOGGLES, type LayerToggles, type MapTheme } from './buildMapStyle.js';
 
@@ -30,8 +35,22 @@ export function App(): JSX.Element {
   const [manifest, setManifest] = useState<RegionManifest | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [remotePacks, setRemotePacks] = useState<RemotePackEntry[]>([]);
+  const [remoteCollections, setRemoteCollections] = useState<RemotePackCollection[]>([]);
+  const [remoteRoutingBundles, setRemoteRoutingBundles] = useState<RemoteRoutingBundle[]>([]);
+  const [installedRoutingBundles, setInstalledRoutingBundles] = useState<string[]>([]);
+  const [activeRoutingBundle, setActiveRoutingBundle] = useState<string | null>(null);
+  const [installedPacks, setInstalledPacks] = useState<RegionManifest[]>([]);
+  const [storage, setStorage] = useState<{ usage: number; quota: number } | null>(null);
   const [downloading, setDownloading] = useState<string | null>(null);
   const [progress, setProgress] = useState<PackDownloadProgress | null>(null);
+  const [collectionProgress, setCollectionProgress] = useState<{
+    current: number;
+    total: number;
+    packName: string;
+    progress: PackDownloadProgress | null;
+  } | null>(null);
+  const [routingProgress, setRoutingProgress] = useState<RoutingDownloadProgress | null>(null);
+  const [routingDownloading, setRoutingDownloading] = useState<string | null>(null);
   const [loadingLocal, setLoadingLocal] = useState(false);
   const [theme, setTheme] = useState<MapTheme>('default');
   const [toggles, setToggles] = useState<LayerToggles>(DEFAULT_LAYER_TOGGLES);
@@ -41,18 +60,73 @@ export function App(): JSX.Element {
   const [endAddress, setEndAddress] = useState<string | null>(null);
   const [picking, setPicking] = useState<'start' | 'end' | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
   const mapRef = useRef<MapViewHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshInstalledPacks = useCallback(async () => {
+    const [packs, estimate, routing, activeRouting] = await Promise.all([
+      api.packs.list(), getPackStorageEstimate(), api.nationalRouting.list(), api.nationalRouting.current(),
+    ]);
+    setInstalledPacks(packs);
+    setStorage(estimate);
+    setInstalledRoutingBundles(routing.map((bundle) => bundle.id));
+    setActiveRoutingBundle(activeRouting);
+  }, []);
 
   // Fetch the catalog once on mount. Empty list (or 404) is treated as
   // "no remote packs hosted yet" — the local folder loader still works.
   useEffect(() => {
     void fetchAvailablePacks()
-      .then((list) => setRemotePacks(list))
+      .then((catalog) => {
+        setRemotePacks(catalog.packs);
+        setRemoteCollections(catalog.collections);
+        setRemoteRoutingBundles(catalog.routingBundles);
+      })
       .catch((e) => {
         // eslint-disable-next-line no-console
         console.warn('[openmaps] pack catalog fetch failed:', e);
       });
+    void refreshInstalledPacks();
+  }, [refreshInstalledPacks]);
+
+  const downloadNationalRouting = useCallback(async (entry: RemoteRoutingBundle) => {
+    setLoadError(null);
+    setRoutingDownloading(entry.id);
+    setRoutingProgress(null);
+    try {
+      await api.nationalRouting.install(entry, (p) => setRoutingProgress(p));
+      setActiveRoutingBundle(entry.id);
+      await refreshInstalledPacks();
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRoutingDownloading(null);
+      setRoutingProgress(null);
+    }
+  }, [refreshInstalledPacks]);
+
+  const openNationalRouting = useCallback(async (entry: RemoteRoutingBundle) => {
+    setLoadError(null);
+    setRoutingDownloading(entry.id);
+    try {
+      await api.nationalRouting.open(entry.id);
+      setActiveRoutingBundle(entry.id);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRoutingDownloading(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    const updateOnline = () => setOnline(navigator.onLine);
+    window.addEventListener('online', updateOnline);
+    window.addEventListener('offline', updateOnline);
+    return () => {
+      window.removeEventListener('online', updateOnline);
+      window.removeEventListener('offline', updateOnline);
+    };
   }, []);
 
   const downloadPack = useCallback(async (entry: RemotePackEntry) => {
@@ -68,13 +142,64 @@ export function App(): JSX.Element {
       setStartAddress(null);
       setEndAddress(null);
       setPicking(null);
+      await refreshInstalledPacks();
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setDownloading(null);
       setProgress(null);
     }
-  }, []);
+  }, [refreshInstalledPacks]);
+
+  const downloadCollection = useCallback(async (
+    collection: RemotePackCollection,
+    members: RemotePackEntry[],
+  ) => {
+    setLoadError(null);
+    setDownloading(collection.id);
+    setProgress(null);
+    setCollectionProgress(null);
+    try {
+      if (members.length !== collection.members.length) {
+        throw new Error(`The catalog is missing ${collection.members.length - members.length} regions from ${collection.name}`);
+      }
+      const installedIds = new Set(installedPacks.map((pack) => pack.id));
+      const remaining = members.filter((member) => !installedIds.has(member.id));
+      for (const member of remaining) {
+        const compatibilityError = getWebPackCompatibilityError(member);
+        if (compatibilityError) throw new Error(`${member.name}: ${compatibilityError}`);
+      }
+      for (let index = 0; index < remaining.length; index += 1) {
+        const member = remaining[index]!;
+        setCollectionProgress({ current: index + 1, total: remaining.length, packName: member.name, progress: null });
+        await loadPackFromUrl(
+          `./packs/${member.baseUrl}`,
+          (packProgress) => setCollectionProgress({
+            current: index + 1,
+            total: remaining.length,
+            packName: member.name,
+            progress: packProgress,
+          }),
+          false,
+        );
+      }
+      const firstId = collection.members[0];
+      if (!firstId) throw new Error(`${collection.name} has no regions`);
+      const opened = await api.packs.open(firstId);
+      setManifest(opened);
+      setStart(null);
+      setEnd(null);
+      setStartAddress(null);
+      setEndAddress(null);
+      setPicking(null);
+      await refreshInstalledPacks();
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setDownloading(null);
+      setCollectionProgress(null);
+    }
+  }, [installedPacks, refreshInstalledPacks]);
 
   const onFiles = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
@@ -88,12 +213,13 @@ export function App(): JSX.Element {
       setStartAddress(null);
       setEndAddress(null);
       setPicking(null);
+      await refreshInstalledPacks();
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoadingLocal(false);
     }
-  }, []);
+  }, [refreshInstalledPacks]);
 
   // Resolve start/end to display addresses whenever the coordinates change.
   // Effect-ignored stale results: if the user double-picks rapidly we may
@@ -206,6 +332,9 @@ export function App(): JSX.Element {
         <div className="sidebar-header">
           <strong>OpenMaps v2</strong>
           <span className="badge">web</span>
+          <span className={`connection-status ${online ? 'online' : 'offline'}`}>
+            {online ? 'online' : 'offline'}
+          </span>
         </div>
 
         <div className="panel">
@@ -241,14 +370,125 @@ export function App(): JSX.Element {
             </p>
           )}
 
+          {remoteCollections.length > 0 ? (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                Country coverage
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {remoteCollections.map((collection) => {
+                  const members = collection.members
+                    .map((id) => remotePacks.find((pack) => pack.id === id))
+                    .filter((pack): pack is RemotePackEntry => Boolean(pack));
+                  const installedIds = new Set(installedPacks.map((pack) => pack.id));
+                  const remainingCount = members.filter((member) => !installedIds.has(member.id)).length;
+                  const totalBytes = members.reduce((sum, member) => sum + member.totalBytes, 0);
+                  const downloadingCollection = downloading === collection.id;
+                  const missingCatalogMembers = members.length !== collection.members.length;
+                  return (
+                    <div key={collection.id} style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 7 }}>
+                      <strong style={{ fontSize: 13 }}>{collection.name}</strong>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3 }}>
+                        {collection.description}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 5 }}>
+                        Download individual regions or install the full collection. Routing automatically joins every downloaded neighbouring region through shared OSM nodes.
+                      </div>
+                      <button
+                        className="primary"
+                        onClick={() => void downloadCollection(collection, members)}
+                        disabled={downloading !== null || missingCatalogMembers}
+                        style={{ marginTop: 7, width: '100%' }}
+                        title={missingCatalogMembers ? 'The hosted catalog does not contain every collection member' : undefined}
+                      >
+                        {downloadingCollection
+                          ? `Downloading ${collectionProgress?.current ?? 0}/${collectionProgress?.total ?? remainingCount}…`
+                          : remainingCount === 0
+                            ? `Open all ${members.length} downloaded regions`
+                            : `Download ${remainingCount === members.length ? 'all' : `remaining ${remainingCount}`} regions · ${formatBytes(totalBytes)}`}
+                      </button>
+                      {downloadingCollection && collectionProgress ? (
+                        <div style={{ marginTop: 5 }}>
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                            {collectionProgress.packName} · {collectionProgress.current}/{collectionProgress.total}
+                          </div>
+                          <div className="progress" style={{ marginTop: 3 }}>
+                            <div
+                              className="progress-bar"
+                              style={{
+                                width: collectionProgress.progress?.bytesTotal
+                                  ? `${Math.min(100, Math.round((collectionProgress.progress.bytesReceived / collectionProgress.progress.bytesTotal) * 100))}%`
+                                  : '40%',
+                              }}
+                            />
+                          </div>
+                        </div>
+                      ) : null}
+                      {remoteRoutingBundles.filter((bundle) => bundle.country === collection.country).map((bundle) => {
+                        const installed = installedRoutingBundles.includes(bundle.id);
+                        const active = activeRoutingBundle === bundle.id;
+                        const downloadingThis = routingDownloading === bundle.id;
+                        const percent = downloadingThis && routingProgress?.bytesTotal
+                          ? Math.min(100, Math.round((routingProgress.bytesReceived / routingProgress.bytesTotal) * 100))
+                          : null;
+                        return (
+                          <div key={bundle.id} style={{ marginTop: 7, paddingTop: 7, borderTop: '1px solid var(--border)' }}>
+                            <div style={{ fontSize: 12 }}><strong>{bundle.name}</strong> · {formatBytes(bundle.file.bytes)}</div>
+                            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{bundle.description}</div>
+                            <button
+                              className={installed ? '' : 'primary'}
+                              onClick={() => void (installed ? openNationalRouting(bundle) : downloadNationalRouting(bundle))}
+                              disabled={routingDownloading !== null || active}
+                              style={{ marginTop: 5, width: '100%' }}
+                            >
+                              {active ? 'Denmark-wide car routing enabled' : installed ? 'Use installed Denmark-wide car routing' : downloadingThis ? 'Downloading national routing…' : 'Enable Denmark-wide car routing'}
+                            </button>
+                            {downloadingThis ? (
+                              <div style={{ marginTop: 5 }}>
+                                <div className="progress"><div className="progress-bar" style={{ width: percent != null ? `${percent}%` : '40%' }} /></div>
+                                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 2 }}>
+                                  {formatBytes(routingProgress?.bytesReceived ?? 0)}{routingProgress?.bytesTotal ? ` / ${formatBytes(routingProgress.bytesTotal)}` : ''}
+                                </div>
+                              </div>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 6 }}>
+                        {members.map((pack) => {
+                          const compatibilityError = getWebPackCompatibilityError(pack);
+                          return (
+                            <button
+                              key={pack.id}
+                              onClick={() => void downloadPack(pack)}
+                              disabled={downloading !== null || compatibilityError !== null}
+                              style={{ textAlign: 'left' }}
+                              title={compatibilityError ?? `${pack.country} · bbox ${pack.bbox.map((n) => n.toFixed(3)).join(', ')}`}
+                            >
+                              {pack.name} <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>({formatBytes(pack.totalBytes)})</span>
+                              {compatibilityError ? (
+                                <div style={{ color: 'var(--text-muted)', fontSize: 10, marginTop: 2 }}>{compatibilityError}</div>
+                              ) : null}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
           {remotePacks.length > 0 ? (
             <div style={{ marginTop: 8 }}>
               <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
                 {manifest ? 'Switch to another pack' : 'Download a pack'}
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                {remotePacks.map((p) => {
+                {remotePacks.filter((p) => !remoteCollections.some((c) => c.members.includes(p.id))).map((p) => {
                   const isThis = downloading === p.id;
+                  const compatibilityError = getWebPackCompatibilityError(p);
                   const pct =
                     isThis && progress && progress.bytesTotal > 0
                       ? Math.min(
@@ -260,9 +500,9 @@ export function App(): JSX.Element {
                     <button
                       key={p.id}
                       onClick={() => void downloadPack(p)}
-                      disabled={downloading !== null}
+                      disabled={downloading !== null || compatibilityError !== null}
                       style={{ textAlign: 'left' }}
-                      title={`${p.country} · bbox ${p.bbox.map((n) => n.toFixed(3)).join(', ')}`}
+                      title={compatibilityError ?? `${p.country} · bbox ${p.bbox.map((n) => n.toFixed(3)).join(', ')}`}
                     >
                       <div>
                         {p.name}{' '}
@@ -270,6 +510,9 @@ export function App(): JSX.Element {
                           ({formatBytes(p.totalBytes)})
                         </span>
                       </div>
+                      {compatibilityError ? (
+                        <div style={{ color: 'var(--text-muted)', fontSize: 10, marginTop: 2 }}>{compatibilityError}</div>
+                      ) : null}
                       {isThis ? (
                         <div style={{ marginTop: 6 }}>
                           <div className="progress">
@@ -294,6 +537,45 @@ export function App(): JSX.Element {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+          ) : null}
+
+          {installedPacks.length > 0 ? (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>
+                Installed packs{storage ? ` · ${formatBytes(storage.usage)} used` : ''}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {installedPacks.map((pack) => (
+                  <div key={pack.id} style={{ display: 'flex', gap: 4 }}>
+                    <button
+                      style={{ textAlign: 'left', flex: 1 }}
+                      onClick={() => {
+                        void api.packs.open(pack.id).then((opened) => {
+                          setManifest(opened);
+                          setLoadError(null);
+                          setSidebarOpen(false);
+                        }).catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)));
+                      }}
+                    >
+                      {pack.name} <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>({pack.country})</span>
+                    </button>
+                    <button
+                      aria-label={`Remove ${pack.name}`}
+                      title={`Remove ${pack.name}`}
+                      onClick={() => {
+                        if (!window.confirm(`Remove downloaded pack '${pack.name}'?`)) return;
+                        void api.packs.uninstall(pack.id).then(() => {
+                          if (manifest?.id === pack.id) setManifest(null);
+                          return refreshInstalledPacks();
+                        }).catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)));
+                      }}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
               </div>
             </div>
           ) : null}
@@ -347,6 +629,11 @@ export function App(): JSX.Element {
                   return next;
                 })
               }
+              onSetWaypoint={(which, point) => {
+                if (which === 'start') setStart(point);
+                else setEnd(point);
+                setPicking(null);
+              }}
             />
             <MapStylePanel
               theme={theme}
@@ -358,8 +645,8 @@ export function App(): JSX.Element {
         ) : null}
 
         <div className="footer">
-          MVP web build. Packs stay in memory until refresh — OPFS
-          persistence is a future step.
+          Downloaded packs persist in this browser and are checksum-verified
+          before opening. The app shell is available after an offline reload.
         </div>
       </aside>
       <main className={`map-pane${picking ? ' crosshair' : ''}`}>

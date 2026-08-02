@@ -78,6 +78,7 @@ export function writeGeocodeDb(outPath: string, data: SyntheticData): void {
         way_id INTEGER
       );
       CREATE INDEX edges_from ON edges(from_node);
+      CREATE INDEX edges_to ON edges(to_node);
 
       CREATE VIRTUAL TABLE edges_rtree USING rtree(
         id, min_lat, max_lat, min_lon, max_lon
@@ -206,11 +207,12 @@ export function writeGeocodeDb(outPath: string, data: SyntheticData): void {
     }
 
     // Add a "street" place for each unique road name so forward search can
-    // find streets too. ID is derived from the road name to avoid collisions
-    // with the synthetic place ids (which are "p:..." / "poi:...").
+    // find streets too. Preserve the complete name in an encoded ID: a
+    // lowercased/hyphenated slug can make distinct OSM spellings collide
+    // (for example case-only or whitespace-only variants in real extracts).
     for (const [name, c] of roadCentroid) {
       placeRowid += 1;
-      const id = `street:${name.replaceAll(/\s+/g, '-').toLowerCase()}`;
+      const id = `street:${encodeURIComponent(name)}`;
       const lat = c.sumLat / c.n;
       const lon = c.sumLon / c.n;
       insertPlace.run(id, name, 'street', lat, lon, 'XX', null);

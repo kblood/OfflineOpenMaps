@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { mkdir, rm } from 'node:fs/promises';
+import { mkdir, rm, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { buildFakelandData } from './synthetic.js';
 import { writeGeocodeDb } from './writeGeocode.js';
 import { writeMbtiles } from './writeMbtiles.js';
 import { writeManifest } from './writeManifest.js';
+import { writeUnifiedDatabase } from './writeUnifiedDatabase.js';
 import { readOsmXml } from './osmXmlReader.js';
 import { readOsmPbf } from './osmPbfReader.js';
 import { osmToPack } from './osmToPack.js';
@@ -22,6 +23,9 @@ interface CliArgs {
   pbfPath?: string;
   osmPath?: string;
   clipBbox?: [number, number, number, number];
+  skipDawaParcels?: boolean;
+  skipDawa?: boolean;
+  unifiedDatabase?: boolean;
 }
 
 function parseArgs(argv: readonly string[]): CliArgs {
@@ -61,6 +65,12 @@ function parseArgs(argv: readonly string[]): CliArgs {
           process.exit(2);
         }
       }
+    } else if (a === '--skip-dawa-parcels') {
+      args.skipDawaParcels = true;
+    } else if (a === '--skip-dawa') {
+      args.skipDawa = true;
+    } else if (a === '--unified-database') {
+      args.unifiedDatabase = true;
     } else if (a === '--help' || a === '-h') args.command = 'help';
   }
   return args;
@@ -87,6 +97,9 @@ Usage:
   region-builder build-pbf --pbf <file.osm.pbf> --id <id> --out <dir>
                            [--name <human-name>] [--country <XX>]
                            [--bbox <minLon,minLat,maxLon,maxLat>]
+                           [--skip-dawa-parcels]
+                           [--skip-dawa]
+                           [--unified-database]
       Build a pack from a Geofabrik .osm.pbf extract. For country-sized
       files you almost always want --bbox to clip down to a region of
       interest before the pack is written; otherwise expect multi-GB
@@ -97,6 +110,8 @@ Examples:
   region-builder build-osm --in andorra.osm --id andorra --name Andorra --country AD --out ./packs
   region-builder build-pbf --pbf denmark.osm.pbf --bbox 12.4,55.6,12.7,55.75 \\
                            --id copenhagen --name Copenhagen --country DK --out ./packs
+  region-builder build-pbf --pbf denmark.osm.pbf --id denmark --name Denmark \\
+                           --country DK --out ./packs --unified-database
 `);
     return;
   }
@@ -178,11 +193,12 @@ Examples:
   // address registry — full coverage, daily-updated, parcel polygons included).
   // Other countries keep OSM addresses; we can broaden this when another
   // country's authoritative registry is wired up.
-  if (country === 'DK') {
+  if (country === 'DK' && !args.skipDawa) {
     process.stdout.write('  - augmenting with DAWA (authoritative DK addresses)\n');
     try {
       const dawa = await fetchDawa({
         bbox: data.bbox,
+        includeParcels: !args.skipDawaParcels,
         onProgress: (msg) => process.stdout.write(`    ${msg}\n`),
       });
       data = applyDawa(data, dawa);
@@ -194,6 +210,8 @@ Examples:
         `  - DAWA fetch failed (continuing with OSM addresses): ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
+  } else if (country === 'DK') {
+    process.stdout.write('  - skipping DAWA enrichment (OSM-only regional build)\n');
   }
 
   // Snap address pins to the centroid of their containing building footprint
@@ -221,6 +239,17 @@ Examples:
   process.stdout.write('  - writing geocode.sqlite\n');
   writeGeocodeDb(join(packDir, 'geocode.sqlite'), data);
 
+  if (args.unifiedDatabase) {
+    process.stdout.write('  - combining tiles, search and routing into openmaps.sqlite\n');
+    await writeUnifiedDatabase({
+      tilesPath: join(packDir, 'tiles.mbtiles'),
+      geocodePath: join(packDir, 'geocode.sqlite'),
+      outPath: join(packDir, 'openmaps.sqlite'),
+    });
+    // A country pack ships one database, not a hidden duplicate of it.
+    await Promise.all([unlink(join(packDir, 'tiles.mbtiles')), unlink(join(packDir, 'geocode.sqlite'))]);
+  }
+
   process.stdout.write('  - writing manifest.json\n');
   const [minLon, minLat, maxLon, maxLat] = data.bbox;
   const cx = (minLon + maxLon) / 2;
@@ -240,6 +269,7 @@ Examples:
     builderCommit: process.env.GIT_COMMIT ?? '0000000',
     tileSample: { z, x: tx, y: ty },
     ...(useChosenAnchors ? { anchors: chooseAnchors(data) } : {}),
+    ...(args.unifiedDatabase ? { unifiedDatabase: true } : {}),
   });
 
   process.stdout.write(`Done. Pack ready at ${packDir}\n`);

@@ -4,7 +4,7 @@
 
 export interface RegionManifest {
   /** Schema version of the manifest itself. Bump when the shape changes. */
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
 
   /** Stable, lowercase, hyphenated. e.g. "denmark", "us-california". */
   id: string;
@@ -29,6 +29,8 @@ export interface RegionManifest {
     tiles: PackFile;
     geocode: PackFile;
     routing: PackFile;
+    /** Schema v2 country packs store all logical data in one SQLite file. */
+    database?: PackFile;
   };
 
   /** Anchors used by the self-test harness to verify the pack works offline. */
@@ -78,9 +80,9 @@ export function validateManifest(raw: unknown): RegionManifest {
   }
   const m = raw as Record<string, unknown>;
 
-  if (m.schemaVersion !== 1) {
+  if (m.schemaVersion !== 1 && m.schemaVersion !== 2) {
     throw new ManifestValidationError(
-      `unsupported schemaVersion ${String(m.schemaVersion)} (expected 1)`,
+      `unsupported schemaVersion ${String(m.schemaVersion)} (expected 1 or 2)`,
       'schemaVersion',
     );
   }
@@ -114,6 +116,19 @@ export function validateManifest(raw: unknown): RegionManifest {
   validatePackFile(files.tiles, 'files.tiles');
   validatePackFile(files.geocode, 'files.geocode');
   validatePackFile(files.routing, 'files.routing');
+  if (m.schemaVersion === 2) {
+    validatePackFile(files.database, 'files.database');
+    const database = files.database as Record<string, unknown>;
+    for (const name of ['tiles', 'geocode', 'routing'] as const) {
+      const alias = files[name] as Record<string, unknown>;
+      if (alias.path !== database.path || alias.bytes !== database.bytes || alias.sha256 !== database.sha256) {
+        throw new ManifestValidationError(
+          `files.${name} must be an exact alias of files.database in schemaVersion 2`,
+          `files.${name}`,
+        );
+      }
+    }
+  }
 
   const anchors = m.selfTestAnchors as Record<string, unknown> | undefined;
   if (!anchors || typeof anchors !== 'object') {
@@ -141,6 +156,18 @@ function validatePackFile(raw: unknown, field: string): void {
   const f = raw as Record<string, unknown>;
   if (typeof f.path !== 'string' || f.path.length === 0) {
     throw new ManifestValidationError(`${field}.path missing`, field);
+  }
+  const path = f.path as string;
+  const withoutTrailingSlash = path.endsWith('/') ? path.slice(0, -1) : path;
+  const pathSegments = withoutTrailingSlash.split('/');
+  if (
+    withoutTrailingSlash.length === 0 ||
+    path.includes('\\') ||
+    path.startsWith('/') ||
+    path.includes('//') ||
+    pathSegments.some((segment) => segment === '.' || segment === '..' || !/^[A-Za-z0-9._-]+$/.test(segment))
+  ) {
+    throw new ManifestValidationError(`${field}.path must be a safe relative path`, field);
   }
   if (typeof f.bytes !== 'number' || !Number.isInteger(f.bytes) || f.bytes < 0) {
     throw new ManifestValidationError(`${field}.bytes must be non-negative integer`, field);

@@ -20,10 +20,11 @@ export class InternalRouter implements Router {
   constructor(db: WebDb) {
     this.db = db;
     this.edgesFromStmt = db.prepare(`
-      SELECT id, from_node, to_node, length_m, max_speed_kmh,
-             allows_car, allows_bike, allows_foot, road_name
-      FROM edges
-      WHERE from_node = ?
+      SELECT e.id, e.from_node, e.to_node, e.length_m, e.max_speed_kmh,
+             e.allows_car, e.allows_bike, e.allows_foot, e.road_name,
+             n.lat AS to_lat, n.lon AS to_lon
+      FROM edges e JOIN nodes n ON n.id = e.to_node
+      WHERE e.from_node = ?
     `);
     this.nodeByIdStmt = db.prepare('SELECT lat, lon FROM nodes WHERE id = ?');
     const prepareSnap = (col: 'allows_car' | 'allows_bike' | 'allows_foot'): Stmt =>
@@ -164,12 +165,17 @@ export class InternalRouter implements Router {
       };
     }
 
+    const targetRow = this.nodeByIdStmt.get(toId);
+    if (!targetRow) return null;
+    const targetLat = Number(targetRow['lat']);
+    const targetLon = Number(targetRow['lon']);
+    const maxSpeed = profile === 'foot' ? 5 : profile === 'bike' ? 18 : 130;
     const dist = new Map<number, number>();
     const prev = new Map<number, { nodeId: number; edgeId: number; roadName: string | null }>();
     dist.set(fromId, 0);
 
-    const heap = new MinHeap<{ id: number; d: number }>((a, b) => a.d - b.d);
-    heap.push({ id: fromId, d: 0 });
+    const heap = new MinHeap<{ id: number; d: number; priority: number }>((a, b) => a.priority - b.priority);
+    heap.push({ id: fromId, d: 0, priority: 0 });
 
     const allowsField: 'allows_car' | 'allows_bike' | 'allows_foot' =
       profile === 'car' ? 'allows_car' : profile === 'bike' ? 'allows_bike' : 'allows_foot';
@@ -189,13 +195,19 @@ export class InternalRouter implements Router {
           length_m: Number(eRow['length_m']),
           max_speed_kmh: Number(eRow['max_speed_kmh']),
           road_name: eRow['road_name'] == null ? null : String(eRow['road_name']),
+          to_lat: Number(eRow['to_lat']),
+          to_lon: Number(eRow['to_lon']),
         };
         const cost = edgeCost(e, profile);
         const alt = cur.d + cost;
         if (alt < (dist.get(e.to_node) ?? Infinity)) {
           dist.set(e.to_node, alt);
           prev.set(e.to_node, { nodeId: cur.id, edgeId: e.id, roadName: e.road_name });
-          heap.push({ id: e.to_node, d: alt });
+          const node = { lat: e.to_lat, lon: e.to_lon };
+          const heuristic = node
+            ? (haversineMeters(node.lat, node.lon, targetLat, targetLon) / 1000 / maxSpeed) * 3600
+            : 0;
+          heap.push({ id: e.to_node, d: alt, priority: alt + heuristic });
         }
       }
     }
@@ -327,12 +339,23 @@ interface EdgeRow {
   length_m: number;
   max_speed_kmh: number;
   road_name: string | null;
+  to_lat: number;
+  to_lon: number;
 }
 
 function edgeCost(e: EdgeRow, profile: Profile): number {
   const cap = profile === 'foot' ? 5 : profile === 'bike' ? 18 : 130;
   const effective = Math.min(e.max_speed_kmh > 0 ? e.max_speed_kmh : cap, cap);
   return (e.length_m / 1000 / effective) * 3600;
+}
+
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const radians = Math.PI / 180;
+  const dLat = (lat2 - lat1) * radians;
+  const dLon = (lon2 - lon1) * radians;
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1 * radians) * Math.cos(lat2 * radians) * Math.sin(dLon / 2) ** 2;
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 function squaredFlat(la1: number, lo1: number, la2: number, lo2: number): number {

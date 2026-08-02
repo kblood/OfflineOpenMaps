@@ -42,16 +42,27 @@ network-severed.
 
 | Concern | Choice | Why |
 | ------- | ------ | --- |
-| Tile format | **MBTiles (SQLite + tiles BLOBs)** | Trivially writeable from Node, single file, Electron file:// happy |
+| Tile format | **MBTiles tables in SQLite** | Standard MBTiles tables; schema-v2 country packs keep tiles, search and routing in one SQLite file |
 | Tile renderer | **MapLibre GL JS** with custom `omap://` protocol | Standard vector renderer; protocol handler routes tile reads through IPC |
-| Geocoding | **SQLite FTS5 + R*Tree, one DB per region** | Same DB serves forward (FTS5) and reverse (R*Tree) |
-| Routing engine | **InternalRouter — JS Dijkstra over OSM road graph in SQLite** | Real graph-based; same DB shared with geocoder; no native deps |
+| Geocoding | **SQLite FTS5 + R*Tree** | Same database serves forward (FTS5) and reverse (R*Tree) |
+| Routing engine | **InternalRouter — JS Dijkstra over OSM road graph in SQLite** | Real graph-based; schema-v2 country packs share one database with tiles and geocoding |
 | SQLite binding | **`node:sqlite`** (built into Node 22.5+ / Electron 42+) | Zero native compile, ships FTS5 + R*Tree by default |
 | Desktop shell | Electron 42 with strict CSP and `contextIsolation` | Bundled Node 22.22 has node:sqlite |
 | UI | React 18 + Vite 5 + MapLibre GL JS 4 | Boring; not a research project |
 
 Routing engine is behind a `Router` interface; BRouter (Java sidecar) or
 Valhalla can drop in later without UI changes.
+
+## Use OpenMaps inside another app
+
+`@openmaps/core` now exports a platform-neutral `OpenMapsClient`. It presents
+pack discovery and lifecycle, tiles, search, reverse geocoding, parcels,
+routing, and the offline self-test through one stable object. Node and Electron
+hosts can create it directly with `createNodeOpenMaps()` from
+`@openmaps/platform-node`; other hosts provide a `PackStorage` adapter.
+
+See [INTEGRATION.md](./INTEGRATION.md) for a complete Node example, lifecycle
+events, custom browser/mobile storage guidance, and renderer integration notes.
 
 ## Repo layout
 
@@ -110,12 +121,23 @@ should show four green dots and the message **"✓ Fully offline."**
 
 ## What v2 still needs
 
+Country-scale publishing is documented in [COUNTRY_PACKS.md](./COUNTRY_PACKS.md).
+The builder creates one SQLite database for a country. The web shell streams
+schema-v2 databases into OPFS, verifies them incrementally, and serves tiles,
+search, parcel lookup, and routing from worker-hosted sqlite-wasm without
+loading the complete multi-gigabyte file into JavaScript memory.
+
+As a smaller-download alternative, the Denmark catalog is also a collection of
+28 independent regional packs. Users can install only the regions they need or
+download the complete collection. Desktop and modern browsers route across the
+installed members as one graph by joining their shared global OSM node ids.
+
 ### Nice-to-haves
 
 1. **Better road labelling at low zoom**, more map style polish.
-2. **Optional URL-based pack install**. Today the UI has "Install from
-   folder…"; a follow-up could add a "fetch by URL" path that downloads a
-   zip and unpacks it (a one-shot online action; runtime stays offline).
+2. **Pause/resume controls in the download UI.** Hosted schema-v2 transfers
+   already resume from durable OPFS chunks after an interruption, but the UI
+   does not yet expose explicit pause and cancel actions.
 3. **Multipolygon / turn-restriction relations**. Currently relations are
    ignored on ingest, so one-way nuances driven by `<relation type=restriction>`
    aren't honored. Adding them improves real-world routing quality.

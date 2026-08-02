@@ -13,6 +13,8 @@ export interface ManifestOpts {
   data: SyntheticData;
   builderCommit: string;
   tileSample: { z: number; x: number; y: number };
+  /** Emit a schema v2 manifest for one database containing tiles, search and routing. */
+  unifiedDatabase?: boolean;
   /**
    * Self-test anchors. If omitted, a generic set derived from the bbox is
    * used (search terms default to the pack name, reverse/route points placed
@@ -26,8 +28,9 @@ export interface ManifestOpts {
 }
 
 export async function writeManifest(opts: ManifestOpts): Promise<RegionManifest> {
-  const tilesPath = join(opts.packDir, 'tiles.mbtiles');
-  const geocodePath = join(opts.packDir, 'geocode.sqlite');
+  const unified = opts.unifiedDatabase === true;
+  const tilesPath = join(opts.packDir, unified ? 'openmaps.sqlite' : 'tiles.mbtiles');
+  const geocodePath = join(opts.packDir, unified ? 'openmaps.sqlite' : 'geocode.sqlite');
   // routing/ is reserved for engines that need separate files; for the
   // InternalRouter the data is inside geocode.sqlite, but we still declare
   // a "routing" entry pointing at the same file so the manifest shape is
@@ -38,20 +41,27 @@ export async function writeManifest(opts: ManifestOpts): Promise<RegionManifest>
   const geocodeHash = await sha256OfFile(geocodePath);
 
   const manifest: RegionManifest = {
-    schemaVersion: 1,
+    schemaVersion: unified ? 2 : 1,
     id: opts.id,
     name: opts.name,
     country: opts.country,
     bbox: opts.data.bbox,
     builtAt: new Date().toISOString(),
     builderCommit: opts.builderCommit,
-    files: {
-      tiles: { path: 'tiles.mbtiles', bytes: tilesStat.size, sha256: tilesHash },
-      geocode: { path: 'geocode.sqlite', bytes: geocodeStat.size, sha256: geocodeHash },
-      // For now points at geocode.sqlite (InternalRouter uses it). A real
-      // BRouter pack would point to a routing/ directory of .rd5 files.
-      routing: { path: 'geocode.sqlite', bytes: geocodeStat.size, sha256: geocodeHash },
-    },
+    files: unified
+      ? (() => {
+          const database = { path: 'openmaps.sqlite', bytes: tilesStat.size, sha256: tilesHash };
+          // The logical aliases preserve the existing RegionPack interface,
+          // while the physical artifact remains exactly one SQLite database.
+          return { tiles: database, geocode: database, routing: database, database };
+        })()
+      : {
+          tiles: { path: 'tiles.mbtiles', bytes: tilesStat.size, sha256: tilesHash },
+          geocode: { path: 'geocode.sqlite', bytes: geocodeStat.size, sha256: geocodeHash },
+          // InternalRouter uses the geocode SQLite; a future external router
+          // can replace this logical alias with its own data file.
+          routing: { path: 'geocode.sqlite', bytes: geocodeStat.size, sha256: geocodeHash },
+        },
     selfTestAnchors: {
       searchTerms: opts.anchors?.searchTerms ? [...opts.anchors.searchTerms] : ['Faketown', 'Avenue A'],
       reversePoint: opts.anchors?.reversePoint ?? {
